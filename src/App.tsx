@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -123,7 +123,7 @@ function Thumbnail({
   pageNumber,
   selected,
   onSelect,
-  onRemove,
+  onContextMenu,
   onPointerDragStart,
   compositionIndex,
   isDragging,
@@ -132,8 +132,8 @@ function Thumbnail({
   document: PDFDocumentProxy;
   pageNumber: number;
   selected: boolean;
-  onSelect: () => void;
-  onRemove: () => void;
+  onSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onContextMenu: (position: { x: number; y: number }) => void;
   onPointerDragStart: (position: { x: number; y: number }) => void;
   compositionIndex: number;
   isDragging: boolean;
@@ -142,8 +142,8 @@ function Thumbnail({
   const [page, setPage] = useState<PDFPageProxy | null>(null);
   const thumbnailScale = page
     ? Math.min(
-        118 / page.getViewport({ scale: 1 }).width,
-        142 / page.getViewport({ scale: 1 }).height,
+        86 / page.getViewport({ scale: 1 }).width,
+        82 / page.getViewport({ scale: 1 }).height,
       )
     : 0.1;
 
@@ -160,9 +160,13 @@ function Thumbnail({
       className={`thumbnail ${selected ? "selected" : ""} ${isDragging ? "dragging" : ""} ${isDropTarget ? "drop-target" : ""}`}
       data-composition-index={compositionIndex}
       onPointerDown={(event) => {
-        if ((event.target as HTMLElement).closest(".page-remove")) return;
+        if (event.button !== 0) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         onPointerDragStart({ x: event.clientX, y: event.clientY });
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onContextMenu({ x: event.clientX, y: event.clientY });
       }}
     >
       <button className="thumbnail-select" onClick={onSelect}>
@@ -170,9 +174,6 @@ function Thumbnail({
         <PdfCanvas page={page} scale={thumbnailScale} />
       </div>
       <span>{pageNumber}</span>
-      </button>
-      <button className="page-remove" onClick={onRemove} aria-label={`删除第 ${pageNumber} 页`} title="从编排中删除">
-        <Trash2 size={12} />
       </button>
     </div>
   );
@@ -285,6 +286,7 @@ function App() {
   const canvasAreaRef = useRef<HTMLElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
   const thumbnailsRef = useRef<HTMLDivElement>(null);
+  const pageContextMenuRef = useRef<HTMLDivElement>(null);
   const libraryRef = useRef<HTMLElement>(null);
   const sourcesRef = useRef<PdfSource[]>([]);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
@@ -309,6 +311,9 @@ function App() {
   const [draggedPageIndex, setDraggedPageIndex] = useState<number | null>(null);
   const [dropPageIndex, setDropPageIndex] = useState<number | null>(null);
   const [dragPointer, setDragPointer] = useState<{ x: number; y: number } | null>(null);
+  const [selectedPageIds, setSelectedPageIds] = useState<Set<string>>(new Set());
+  const [selectionAnchorIndex, setSelectionAnchorIndex] = useState<number | null>(null);
+  const [pageContextMenu, setPageContextMenu] = useState<{ x: number; y: number; pageId: string } | null>(null);
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
   const document = activeSource?.document ?? null;
   const fileName = activeSource?.name ?? "未命名文档";
@@ -316,6 +321,15 @@ function App() {
   useEffect(() => {
     sourcesRef.current = sources;
   }, [sources]);
+
+  useEffect(() => {
+    if (!pageContextMenu) return;
+    const closeMenu = (event: PointerEvent) => {
+      if (!pageContextMenuRef.current?.contains(event.target as Node)) setPageContextMenu(null);
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    return () => window.removeEventListener("pointerdown", closeMenu);
+  }, [pageContextMenu]);
 
   useEffect(() => {
     const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
@@ -406,6 +420,66 @@ function App() {
     setPageNumber((current) => Math.min(Math.max(current, 1), Math.max(next.length, 1)));
   }
 
+  function selectPagesThrough(index: number, anchor = selectionAnchorIndex ?? index) {
+    const [start, end] = [Math.min(anchor, index), Math.max(anchor, index)];
+    setSelectedPageIds(new Set(composition.slice(start, end + 1).map((page) => page.id)));
+    setSelectionAnchorIndex(anchor);
+  }
+
+  function selectCompositionPage(index: number, event: ReactMouseEvent<HTMLButtonElement>) {
+    const page = composition[index];
+    if (!page) return;
+    if (event.shiftKey) {
+      selectPagesThrough(index);
+    } else if (event.metaKey || event.ctrlKey) {
+      setSelectedPageIds((current) => {
+        const next = new Set(current);
+        if (next.has(page.id)) next.delete(page.id);
+        else next.add(page.id);
+        return next;
+      });
+      setSelectionAnchorIndex(index);
+    } else {
+      setSelectedPageIds(new Set([page.id]));
+      setSelectionAnchorIndex(index);
+    }
+    changePage(index + 1);
+  }
+
+  function openPageContextMenu(index: number, position: { x: number; y: number }) {
+    const page = composition[index];
+    if (!page) return;
+    if (!selectedPageIds.has(page.id)) {
+      setSelectedPageIds(new Set([page.id]));
+      setSelectionAnchorIndex(index);
+    }
+    setPageContextMenu({ ...position, pageId: page.id });
+  }
+
+  function copySelectedPages(fallbackPageId?: string) {
+    const ids = selectedPageIds.size ? selectedPageIds : new Set(fallbackPageId ? [fallbackPageId] : []);
+    const selected = composition.filter((page) => ids.has(page.id));
+    if (!selected.length) return;
+    const copies = selected.map((page) => ({ ...page, id: `${page.id}-copy-${crypto.randomUUID()}` }));
+    const lastSelectedIndex = composition.reduce((last, page, index) => ids.has(page.id) ? index : last, -1);
+    const next = [...composition];
+    next.splice(lastSelectedIndex + 1, 0, ...copies);
+    commitComposition(next);
+    setSelectedPageIds(new Set(copies.map((page) => page.id)));
+    setSelectionAnchorIndex(lastSelectedIndex + 1);
+    setPageNumber(lastSelectedIndex + 2);
+  }
+
+  function deleteSelectedPages(fallbackPageId?: string) {
+    const ids = selectedPageIds.size ? selectedPageIds : new Set(fallbackPageId ? [fallbackPageId] : []);
+    if (!ids.size) return;
+    const next = composition.filter((page) => !ids.has(page.id));
+    commitComposition(next);
+    setSelectedPageIds(new Set());
+    setSelectionAnchorIndex(null);
+    setPageNumber((current) => Math.max(1, Math.min(current, next.length)));
+  }
+
   useEffect(() => {
     if (draggedPageIndex === null) return;
 
@@ -483,6 +557,25 @@ function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && composition.length) {
+        event.preventDefault();
+        const direction = event.key === "ArrowUp" ? -1 : 1;
+        const nextIndex = Math.max(0, Math.min(composition.length - 1, pageNumber - 1 + direction));
+        selectPagesThrough(nextIndex, selectionAnchorIndex ?? pageNumber - 1);
+        changePage(nextIndex + 1);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        setSelectedPageIds(new Set(composition.map((page) => page.id)));
+        setSelectionAnchorIndex(0);
+        return;
+      }
+      if ((event.key === "Backspace" || event.key === "Delete") && selectedPageIds.size) {
+        event.preventDefault();
+        deleteSelectedPages();
+        return;
+      }
       if (!event.metaKey && !event.ctrlKey) return;
       if (event.key.toLowerCase() === "z") {
         event.preventDefault();
@@ -508,7 +601,7 @@ function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [composition, pageNumber, selectedPageIds, selectionAnchorIndex]);
 
   async function openFile(file?: File) {
     if (!file) return;
@@ -615,12 +708,6 @@ function App() {
       setPageNumber(closestPage);
       scrollFrameRef.current = null;
     });
-  }
-
-  function removePage(pageId: string) {
-    const next = compositionRef.current.filter((page) => page.id !== pageId);
-    commitComposition(next);
-    setPageNumber((current) => Math.max(1, Math.min(current, composition.length - 1)));
   }
 
   function movePage(from: number, to: number) {
@@ -771,9 +858,9 @@ function App() {
                   key={page.id}
                   document={source.document}
                   pageNumber={page.pageNumber}
-                  selected={pageNumber === index + 1}
-                  onSelect={() => changePage(index + 1)}
-                  onRemove={() => removePage(page.id)}
+                  selected={selectedPageIds.has(page.id)}
+                  onSelect={(event) => selectCompositionPage(index, event)}
+                  onContextMenu={(position) => openPageContextMenu(index, position)}
                   onPointerDragStart={(position) => {
                     setDragPointer(position);
                     setDraggedPageIndex(index);
@@ -938,6 +1025,23 @@ function App() {
           />
         );
       })()}
+      {pageContextMenu && (
+        <div
+          className="page-context-menu"
+          ref={pageContextMenuRef}
+          style={{ left: pageContextMenu.x, top: pageContextMenu.y }}
+          role="menu"
+        >
+          <button role="menuitem" onClick={() => {
+            copySelectedPages(pageContextMenu.pageId);
+            setPageContextMenu(null);
+          }}>复制</button>
+          <button className="danger" role="menuitem" onClick={() => {
+            deleteSelectedPages(pageContextMenu.pageId);
+            setPageContextMenu(null);
+          }}>删除</button>
+        </div>
+      )}
     </main>
   );
 }
