@@ -125,6 +125,49 @@ function Thumbnail({
   );
 }
 
+function ContinuousPage({
+  document,
+  pageNumber,
+  canvasSize,
+  zoom,
+  register,
+}: {
+  document: PDFDocumentProxy;
+  pageNumber: number;
+  canvasSize: { width: number; height: number };
+  zoom: number;
+  register: (pageNumber: number, element: HTMLDivElement | null) => void;
+}) {
+  const [page, setPage] = useState<PDFPageProxy | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    document.getPage(pageNumber).then((loaded) => active && setPage(loaded));
+    return () => {
+      active = false;
+    };
+  }, [document, pageNumber]);
+
+  const viewport = page?.getViewport({ scale: 1 });
+  const fitScale = viewport
+    ? Math.min(
+        Math.max(canvasSize.width - 120, 240) / viewport.width,
+        Math.max(canvasSize.height - 120, 240) / viewport.height,
+      )
+    : 1;
+
+  return (
+    <div
+      className="continuous-page"
+      data-page-number={pageNumber}
+      ref={(element) => register(pageNumber, element)}
+    >
+      <PdfCanvas page={page} scale={fitScale * (zoom / 100)} className="main-pdf-page" />
+      <span className="page-label">{pageNumber}</span>
+    </div>
+  );
+}
+
 function EmptyDocument({ onOpen }: { onOpen: () => void }) {
   return (
     <section className="empty-document">
@@ -138,8 +181,6 @@ function EmptyDocument({ onOpen }: { onOpen: () => void }) {
         </div>
         <div className="sparkle"><Sparkles size={21} /></div>
       </div>
-      <p className="eyebrow">LIGHTWEIGHT · PRIVATE · LOCAL</p>
-      <h1>让每一页，都恰到好处。</h1>
       <p className="empty-copy">
         在本地打开 PDF，完成批注、签名与页面整理。文件不会离开你的设备。
       </p>
@@ -155,8 +196,9 @@ function EmptyDocument({ onOpen }: { onOpen: () => void }) {
 function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
+  const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
+  const scrollFrameRef = useRef<number | null>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
-  const [page, setPage] = useState<PDFPageProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [fileName, setFileName] = useState("未命名文档");
   const [zoom, setZoom] = useState(100);
@@ -233,16 +275,9 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!document) {
-      setPage(null);
-      return;
-    }
-    let active = true;
-    document.getPage(pageNumber).then((loaded) => active && setPage(loaded));
-    return () => {
-      active = false;
-    };
-  }, [document, pageNumber]);
+    pageElementsRef.current.clear();
+    if (canvasScrollRef.current) canvasScrollRef.current.scrollTop = 0;
+  }, [document]);
 
   async function openFile(file?: File) {
     if (!file) return;
@@ -263,17 +298,37 @@ function App() {
 
   function changePage(next: number) {
     if (!document) return;
-    setPageNumber(Math.min(Math.max(next, 1), document.numPages));
+    const target = Math.min(Math.max(next, 1), document.numPages);
+    setPageNumber(target);
+    pageElementsRef.current.get(target)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
-  const pageViewport = page?.getViewport({ scale: 1 });
-  const fitScale = pageViewport
-    ? Math.min(
-        Math.max(canvasSize.width - 96, 240) / pageViewport.width,
-        Math.max(canvasSize.height - 96, 240) / pageViewport.height,
-      )
-    : 1;
-  const renderedScale = fitScale * (zoom / 100);
+  function registerPage(pageIndex: number, element: HTMLDivElement | null) {
+    if (element) pageElementsRef.current.set(pageIndex, element);
+    else pageElementsRef.current.delete(pageIndex);
+  }
+
+  function updateVisiblePage() {
+    if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      const scroller = canvasScrollRef.current;
+      if (!scroller) return;
+      const center = scroller.getBoundingClientRect().top + scroller.clientHeight / 2;
+      let closestPage = 1;
+      let closestDistance = Number.POSITIVE_INFINITY;
+
+      pageElementsRef.current.forEach((element, index) => {
+        const rect = element.getBoundingClientRect();
+        const distance = Math.abs(rect.top + rect.height / 2 - center);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestPage = index;
+        }
+      });
+      setPageNumber(closestPage);
+      scrollFrameRef.current = null;
+    });
+  }
 
   return (
     <main
@@ -363,7 +418,7 @@ function App() {
                   document={document}
                   pageNumber={index + 1}
                   selected={pageNumber === index + 1}
-                  onSelect={() => setPageNumber(index + 1)}
+                  onSelect={() => changePage(index + 1)}
                 />
               ))
             ) : (
@@ -376,12 +431,21 @@ function App() {
         </aside>
 
         <section className="canvas-area">
-          <div className="canvas-scroll" ref={canvasScrollRef}>
+          <div className="canvas-scroll" ref={canvasScrollRef} onScroll={updateVisiblePage}>
             {loading ? (
               <div className="loading-card"><Circle className="spinner" size={28} />正在打开文档…</div>
             ) : document ? (
-              <div className="page-stage">
-                <PdfCanvas page={page} scale={renderedScale} className="main-pdf-page" />
+              <div className="continuous-document">
+                {Array.from({ length: document.numPages }, (_, index) => (
+                  <ContinuousPage
+                    key={index + 1}
+                    document={document}
+                    pageNumber={index + 1}
+                    canvasSize={canvasSize}
+                    zoom={zoom}
+                    register={registerPage}
+                  />
+                ))}
               </div>
             ) : (
               <EmptyDocument onOpen={() => inputRef.current?.click()} />
@@ -416,8 +480,8 @@ function App() {
           <section className="property-section">
             <label>样式</label>
             <div className="color-row">
-              <button className="color-swatch selected" style={{ background: "#AFADE6" }} />
-              <button className="color-swatch" style={{ background: "#E4E6AD" }} />
+              <button className="color-swatch selected" style={{ background: "#99EAFA" }} />
+              <button className="color-swatch" style={{ background: "#FAA999" }} />
               <button className="color-swatch" style={{ background: "#ef6a7a" }} />
               <button className="color-swatch" style={{ background: "#42b59d" }} />
               <button className="add-color"><Plus size={15} /></button>
