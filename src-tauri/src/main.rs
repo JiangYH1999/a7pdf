@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    lightweight_pdf_editor_lib::run()
+    a7pdf_lib::run()
 }

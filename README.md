@@ -1,10 +1,10 @@
-# Luma PDF
+# A7PDF
 
 一款漂亮、轻量、默认离线的跨平台 PDF 编辑器。
 
 > 项目处于早期开发阶段。当前优先实现查看、批注、签名与页面整理；直接修改 PDF 原有文字将在后续版本加入。
 
-![Luma PDF 界面预览](docs/assets/luma-pdf-preview.png)
+![A7PDF 界面预览](docs/assets/a7pdf-preview.png)
 
 ## 技术栈
 

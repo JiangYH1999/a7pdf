@@ -29,6 +29,8 @@ import {
   type PDFDocumentProxy,
   type PDFPageProxy,
 } from "pdfjs-dist";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "./App.css";
 
@@ -154,6 +156,58 @@ function App() {
   const [activeTool, setActiveTool] = useState<Tool>("select");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [isNativeDragging, setIsNativeDragging] = useState(false);
+
+  useEffect(() => {
+    const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
+    if (!tauriWindow.__TAURI_INTERNALS__) return;
+
+    let disposed = false;
+    let removeListener: (() => void) | undefined;
+
+    getCurrentWebview()
+      .onDragDropEvent(async (event) => {
+        if (event.payload.type === "over") {
+          setIsNativeDragging(true);
+          return;
+        }
+        if (event.payload.type === "leave") {
+          setIsNativeDragging(false);
+          return;
+        }
+
+        setIsNativeDragging(false);
+        const pdfPath = event.payload.paths.find((path) => path.toLowerCase().endsWith(".pdf"));
+        if (!pdfPath) {
+          setError("请拖入一个 PDF 文件。");
+          return;
+        }
+
+        setLoading(true);
+        setError("");
+        try {
+          const data = await invoke<number[]>("read_pdf_file", { path: pdfPath });
+          const loadedDocument = await getDocument({ data: new Uint8Array(data) }).promise;
+          setDocument(loadedDocument);
+          setFileName(pdfPath.split(/[\\/]/).pop()?.replace(/\.pdf$/i, "") || "未命名文档");
+          setPageNumber(1);
+        } catch {
+          setError("无法打开此 PDF，请确认文件没有损坏或加密。");
+        } finally {
+          setLoading(false);
+        }
+      })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else removeListener = unlisten;
+      })
+      .catch(() => setError("无法启用系统拖放，请使用“打开 PDF”按钮。"));
+
+    return () => {
+      disposed = true;
+      removeListener?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!document) {
@@ -191,7 +245,7 @@ function App() {
 
   return (
     <main
-      className="app-shell"
+      className={`app-shell ${isNativeDragging ? "native-dragging" : ""}`}
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
         event.preventDefault();
@@ -209,9 +263,9 @@ function App() {
       <header className="titlebar">
         <div className="brand">
           <button className="icon-button quiet" aria-label="菜单"><Menu size={19} /></button>
-          <div className="brand-mark">L</div>
+          <div className="brand-mark">A7</div>
           <div>
-            <strong>Luma PDF</strong>
+            <strong>A7PDF</strong>
             <span>轻量 PDF 编辑器</span>
           </div>
         </div>
@@ -338,6 +392,13 @@ function App() {
           </div>
         </aside>
       </div>
+      {isNativeDragging && (
+        <div className="native-drop-overlay">
+          <FilePlus2 size={34} />
+          <strong>松开以打开 PDF</strong>
+          <span>文件只会在本地处理</span>
+        </div>
+      )}
     </main>
   );
 }

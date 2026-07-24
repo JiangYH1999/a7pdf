@@ -26,7 +26,7 @@ button { color: inherit; }
 .brand { width: 300px; gap: 11px; }
 .brand-mark {
   width: 34px; height: 34px; display: grid; place-items: center;
-  border-radius: 10px; color: white; font-weight: 800; font-size: 18px;
+  border-radius: 10px; color: white; font-weight: 800; font-size: 12px;
   background: linear-gradient(145deg, #7668f2, #5746d6); box-shadow: 0 8px 20px #6558e83d;
 }
 .brand div:last-child { display: flex; flex-direction: column; line-height: 1.25; }
@@ -129,6 +129,16 @@ button { color: inherit; }
 .roadmap-note span { color: #7164e8; font-size: 8px; font-weight: 800; letter-spacing: .12em; }
 .roadmap-note strong { display: block; margin-top: 5px; color: #4a4458; font-size: 10px; }
 .roadmap-note p { color: #8b8694; }
+
+.native-drop-overlay {
+  position: fixed; inset: 16px; z-index: 50; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px; border: 2px dashed #7567eb;
+  border-radius: 18px; background: rgba(246, 244, 255, .9); color: #5f50dc;
+  box-shadow: inset 0 0 0 6px rgba(255,255,255,.65), 0 18px 60px #362b7a2b;
+  backdrop-filter: blur(14px); pointer-events: none;
+}
+.native-drop-overlay strong { margin-top: 4px; font-size: 17px; }
+.native-drop-overlay span { color: #8b85a1; font-size: 11px; }
 
 @media (max-width: 1180px) {
   .workspace { grid-template-columns: 180px minmax(520px, 1fr) 205px; }
