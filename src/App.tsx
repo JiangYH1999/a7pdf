@@ -12,16 +12,14 @@ import {
   MessageSquareText,
   Minus,
   MousePointer2,
-  PanelLeftClose,
-  PanelLeftOpen,
   PenLine,
   Plus,
   Redo2,
   RotateCw,
-  Search,
   Shapes,
   Signature,
   Sparkles,
+  Trash2,
   Type,
   Undo2,
 } from "lucide-react";
@@ -31,6 +29,7 @@ import {
   type PDFDocumentProxy,
   type PDFPageProxy,
 } from "pdfjs-dist";
+import { PDFDocument } from "pdf-lib";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -44,6 +43,12 @@ type PdfSource = {
   id: string;
   name: string;
   document: PDFDocumentProxy;
+  data: Uint8Array;
+};
+type ComposedPage = {
+  id: string;
+  sourceId: string;
+  pageNumber: number;
 };
 
 const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
@@ -118,11 +123,23 @@ function Thumbnail({
   pageNumber,
   selected,
   onSelect,
+  onRemove,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  isDragging,
+  isDropTarget,
 }: {
   document: PDFDocumentProxy;
   pageNumber: number;
   selected: boolean;
   onSelect: () => void;
+  onRemove: () => void;
+  onDragStart: () => void;
+  onDragOver: () => void;
+  onDrop: () => void;
+  isDragging: boolean;
+  isDropTarget: boolean;
 }) {
   const [page, setPage] = useState<PDFPageProxy | null>(null);
   const thumbnailScale = page
@@ -141,24 +158,43 @@ function Thumbnail({
   }, [document, pageNumber]);
 
   return (
-    <button className={`thumbnail ${selected ? "selected" : ""}`} onClick={onSelect}>
+    <div
+      className={`thumbnail ${selected ? "selected" : ""} ${isDragging ? "dragging" : ""} ${isDropTarget ? "drop-target" : ""}`}
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={(event) => {
+        event.preventDefault();
+        onDragOver();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        onDrop();
+      }}
+    >
+      <button className="thumbnail-select" onClick={onSelect}>
       <div className="thumbnail-paper">
         <PdfCanvas page={page} scale={thumbnailScale} />
       </div>
       <span>{pageNumber}</span>
-    </button>
+      </button>
+      <button className="page-remove" onClick={onRemove} aria-label={`删除第 ${pageNumber} 页`} title="从编排中删除">
+        <Trash2 size={12} />
+      </button>
+    </div>
   );
 }
 
 function ContinuousPage({
   document,
   pageNumber,
+  sequenceNumber,
   canvasSize,
   zoom,
   register,
 }: {
   document: PDFDocumentProxy;
   pageNumber: number;
+  sequenceNumber: number;
   canvasSize: { width: number; height: number };
   zoom: number;
   register: (pageNumber: number, element: HTMLDivElement | null) => void;
@@ -184,11 +220,11 @@ function ContinuousPage({
   return (
     <div
       className="continuous-page"
-      data-page-number={pageNumber}
-      ref={(element) => register(pageNumber, element)}
+      data-page-number={sequenceNumber}
+      ref={(element) => register(sequenceNumber, element)}
     >
       <PdfCanvas page={page} scale={fitScale * (zoom / 100)} className="main-pdf-page" />
-      <span className="page-label">{pageNumber}</span>
+      <span className="page-label">{sequenceNumber}</span>
     </div>
   );
 }
@@ -228,6 +264,7 @@ function App() {
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
   const scrollFrameRef = useRef<number | null>(null);
   const [sources, setSources] = useState<PdfSource[]>([]);
+  const [composition, setComposition] = useState<ComposedPage[]>([]);
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [zoom, setZoom] = useState(100);
@@ -235,8 +272,10 @@ function App() {
   const [activeTool, setActiveTool] = useState<Tool>("select");
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState("");
   const [dropTarget, setDropTarget] = useState<DropTarget>(null);
+  const [draggedPageIndex, setDraggedPageIndex] = useState<number | null>(null);
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
   const document = activeSource?.document ?? null;
   const fileName = activeSource?.name ?? "未命名文档";
@@ -317,9 +356,22 @@ function App() {
   }, []);
 
   useEffect(() => {
-    pageElementsRef.current.clear();
-    if (canvasScrollRef.current) canvasScrollRef.current.scrollTop = 0;
-  }, [document]);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.metaKey && !event.ctrlKey) return;
+      if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        setZoom((value) => Math.min(400, value + 10));
+      } else if (event.key === "-" || event.key === "_") {
+        event.preventDefault();
+        setZoom((value) => Math.max(10, value - 10));
+      } else if (event.key === "0") {
+        event.preventDefault();
+        setZoom(100);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   async function openFile(file?: File) {
     if (!file) return;
@@ -330,8 +382,8 @@ function App() {
     });
     try {
       const data = new Uint8Array(await file.arrayBuffer());
-      const loadedDocument = await getDocument({ data }).promise;
-      addSource(file.name, loadedDocument);
+      const loadedDocument = await getDocument({ data: data.slice() }).promise;
+      addSource(file.name, loadedDocument, data);
     } catch {
       setError("无法打开此 PDF，请确认文件没有损坏或加密。");
     } finally {
@@ -347,9 +399,9 @@ function App() {
     });
     try {
       for (const path of paths) {
-        const data = await invoke<number[]>("read_pdf_file", { path });
-        const loadedDocument = await getDocument({ data: new Uint8Array(data) }).promise;
-        addSource(path.split(/[\\/]/).pop() || "未命名文档.pdf", loadedDocument);
+        const data = new Uint8Array(await invoke<number[]>("read_pdf_file", { path }));
+        const loadedDocument = await getDocument({ data: data.slice() }).promise;
+        addSource(path.split(/[\\/]/).pop() || "未命名文档.pdf", loadedDocument, data);
       }
     } catch {
       setError("无法打开此 PDF，请确认文件没有损坏或加密。");
@@ -358,13 +410,22 @@ function App() {
     }
   }
 
-  function addSource(name: string, loadedDocument: PDFDocumentProxy) {
+  function addSource(name: string, loadedDocument: PDFDocumentProxy, data: Uint8Array) {
     const source: PdfSource = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       name: name.replace(/\.pdf$/i, ""),
       document: loadedDocument,
+      data,
     };
     setSources((current) => [...current, source]);
+    setComposition((current) => [
+      ...current,
+      ...Array.from({ length: loadedDocument.numPages }, (_, index) => ({
+        id: `${source.id}-${index + 1}`,
+        sourceId: source.id,
+        pageNumber: index + 1,
+      })),
+    ]);
     setActiveSourceId(source.id);
     setPageNumber(1);
   }
@@ -386,8 +447,8 @@ function App() {
   }
 
   function changePage(next: number) {
-    if (!document) return;
-    const target = Math.min(Math.max(next, 1), document.numPages);
+    if (!composition.length) return;
+    const target = Math.min(Math.max(next, 1), composition.length);
     setPageNumber(target);
     pageElementsRef.current.get(target)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
@@ -417,6 +478,63 @@ function App() {
       setPageNumber(closestPage);
       scrollFrameRef.current = null;
     });
+  }
+
+  function removePage(pageId: string) {
+    setComposition((current) => current.filter((page) => page.id !== pageId));
+    setPageNumber((current) => Math.max(1, Math.min(current, composition.length - 1)));
+  }
+
+  function movePage(from: number, to: number) {
+    if (from === to) return;
+    setComposition((current) => {
+      const next = [...current];
+      const [moved] = next.splice(from, 1);
+      next.splice(from < to ? to - 1 : to, 0, moved);
+      return next;
+    });
+    setPageNumber((from < to ? to - 1 : to) + 1);
+  }
+
+  function removeSource(sourceId: string) {
+    const remaining = sources.filter((source) => source.id !== sourceId);
+    setSources(remaining);
+    setComposition((current) => current.filter((page) => page.sourceId !== sourceId));
+    if (activeSourceId === sourceId) setActiveSourceId(remaining[0]?.id ?? null);
+  }
+
+  function clearSources() {
+    setSources([]);
+    setComposition([]);
+    setActiveSourceId(null);
+    setPageNumber(1);
+  }
+
+  async function exportComposition() {
+    if (!composition.length) return;
+    setExporting(true);
+    setError("");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const output = await PDFDocument.create();
+      const sourceDocuments = new Map<string, PDFDocument>();
+      for (const source of sources) sourceDocuments.set(source.id, await PDFDocument.load(source.data));
+      for (const page of composition) {
+        const source = sourceDocuments.get(page.sourceId);
+        if (!source) continue;
+        const [copiedPage] = await output.copyPages(source, [page.pageNumber - 1]);
+        output.addPage(copiedPage);
+      }
+      const bytes = await output.save();
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+      const link = Object.assign(globalThis.document.createElement("a"), { href: url, download: "A7PDF-合并文档.pdf" });
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError("导出失败，请检查导入的 PDF 是否受密码保护。");
+    } finally {
+      setExporting(false);
+    }
   }
 
   return (
@@ -455,9 +573,9 @@ function App() {
         <div className="title-actions">
           <button className="icon-button" aria-label="撤销" disabled><Undo2 size={18} /></button>
           <button className="icon-button" aria-label="重做" disabled><Redo2 size={18} /></button>
-          <button className="export-button" disabled={!document}>
+          <button className="export-button" disabled={!composition.length || exporting} onClick={exportComposition}>
             <Download size={17} />
-            导出
+            {exporting ? "正在导出" : "导出"}
           </button>
         </div>
       </header>
@@ -480,9 +598,9 @@ function App() {
         <button className="tool-button" title="旋转页面"><RotateCw size={19} /><span>旋转</span></button>
         <div className="toolbar-spacer" />
         <div className="zoom-control">
-          <button onClick={() => setZoom((value) => Math.max(40, value - 10))}><Minus size={16} /></button>
+          <button onClick={() => setZoom((value) => Math.max(10, value - 10))} title="缩小（⌘/Ctrl -）"><Minus size={16} /></button>
           <span>{zoom}%</span>
-          <button onClick={() => setZoom((value) => Math.min(180, value + 10))}><Plus size={16} /></button>
+          <button onClick={() => setZoom((value) => Math.min(400, value + 10))} title="放大（⌘/Ctrl +）"><Plus size={16} /></button>
         </div>
       </nav>
       {loading && (
@@ -495,35 +613,45 @@ function App() {
       <div className="workspace">
         <aside className="sidebar pages-panel">
           <div className="panel-heading">
-            <div className="segmented collapsible-content">
-              <button className="active">页面</button>
-              <button>书签</button>
+            <div className="composition-heading collapsible-content">
+              <strong>页面编排</strong>
+              <span>{composition.length} 页</span>
             </div>
             <button
-              className="icon-button quiet panel-toggle"
+              className="panel-toggle"
               aria-label={leftCollapsed ? "展开侧栏" : "收起侧栏"}
               title={leftCollapsed ? "展开侧栏" : "收起侧栏"}
               onClick={() => setLeftCollapsed((value) => !value)}
-            >
-              {leftCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
-            </button>
+            />
           </div>
-          <div className="search-box collapsible-content"><Search size={15} /><span>搜索页面</span></div>
           <div className="thumbnails collapsible-content">
-            {document ? (
-              Array.from({ length: document.numPages }, (_, index) => (
+            {composition.length ? (
+              composition.map((page, index) => {
+                const source = sources.find((item) => item.id === page.sourceId);
+                if (!source) return null;
+                return (
                 <Thumbnail
-                  key={index + 1}
-                  document={document}
-                  pageNumber={index + 1}
+                  key={page.id}
+                  document={source.document}
+                  pageNumber={page.pageNumber}
                   selected={pageNumber === index + 1}
                   onSelect={() => changePage(index + 1)}
+                  onRemove={() => removePage(page.id)}
+                  onDragStart={() => setDraggedPageIndex(index)}
+                  onDragOver={() => undefined}
+                  onDrop={() => {
+                    if (draggedPageIndex !== null) movePage(draggedPageIndex, index);
+                    setDraggedPageIndex(null);
+                  }}
+                  isDragging={draggedPageIndex === index}
+                  isDropTarget={draggedPageIndex !== null && draggedPageIndex !== index}
                 />
-              ))
+                );
+              })
             ) : (
               <div className="empty-pages">
                 <div className="mini-page" />
-                <span>打开文档后显示缩略图</span>
+                <span>添加 PDF 后，在这里编排页面</span>
               </div>
             )}
           </div>
@@ -550,30 +678,34 @@ function App() {
           <div className="canvas-scroll" ref={canvasScrollRef} onScroll={updateVisiblePage}>
             {loading && !document ? (
               <div className="loading-card"><Circle className="spinner" size={28} />正在打开文档…</div>
-            ) : document ? (
+            ) : composition.length ? (
               <div className="continuous-document">
-                {Array.from({ length: document.numPages }, (_, index) => (
-                  <ContinuousPage
-                    key={index + 1}
-                    document={document}
-                    pageNumber={index + 1}
-                    canvasSize={canvasSize}
-                    zoom={zoom}
-                    register={registerPage}
-                  />
-                ))}
+                {composition.map((page, index) => {
+                  const source = sources.find((item) => item.id === page.sourceId);
+                  return source ? (
+                    <ContinuousPage
+                      key={page.id}
+                      document={source.document}
+                      pageNumber={page.pageNumber}
+                      sequenceNumber={index + 1}
+                      canvasSize={canvasSize}
+                      zoom={zoom}
+                      register={registerPage}
+                    />
+                  ) : null;
+                })}
               </div>
             ) : (
               <EmptyDocument onOpen={() => inputRef.current?.click()} />
             )}
           </div>
-          {document && (
+          {composition.length > 0 && (
             <div className="page-navigation">
               <button onClick={() => changePage(pageNumber - 1)} disabled={pageNumber === 1}>
                 <ChevronLeft size={16} />
               </button>
-              <span><strong>{pageNumber}</strong> / {document.numPages}</span>
-              <button onClick={() => changePage(pageNumber + 1)} disabled={pageNumber === document.numPages}>
+              <span><strong>{pageNumber}</strong> / {composition.length}</span>
+              <button onClick={() => changePage(pageNumber + 1)} disabled={pageNumber === composition.length}>
                 <ChevronRight size={16} />
               </button>
             </div>
@@ -612,18 +744,20 @@ function App() {
               <span>资源管理</span>
               <small>{sources.length} 个文件</small>
             </div>
-            <button className="icon-button add-pdf-button" onClick={() => libraryInputRef.current?.click()} aria-label="添加 PDF">
-              <Plus size={17} />
-            </button>
+            <div className="library-actions">
+              {sources.length > 0 && <button className="clear-all-button" onClick={clearSources}>全部清空</button>}
+              <button className="icon-button add-pdf-button" onClick={() => libraryInputRef.current?.click()} aria-label="添加 PDF"><Plus size={17} /></button>
+            </div>
           </div>
           <div className="pdf-source-list">
             {sources.map((source, index) => (
-              <button
+              <div
                 key={source.id}
                 className={`pdf-source ${source.id === activeSourceId ? "active" : ""}`}
                 onClick={() => {
                   setActiveSourceId(source.id);
-                  setPageNumber(1);
+                  const firstPage = composition.findIndex((page) => page.sourceId === source.id);
+                  if (firstPage >= 0) changePage(firstPage + 1);
                 }}
               >
                 <span className="pdf-source-icon"><FileText size={18} /></span>
@@ -631,7 +765,16 @@ function App() {
                   <strong>{source.name}</strong>
                   <small>{source.document.numPages} 页 · PDF {index + 1}</small>
                 </span>
-              </button>
+                <button
+                  className="source-remove"
+                  aria-label={`清空 ${source.name}`}
+                  title="从资源管理与页面编排中移除"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeSource(source.id);
+                  }}
+                ><Trash2 size={14} /></button>
+              </div>
             ))}
             {!sources.length && (
               <button className="library-empty" onClick={() => libraryInputRef.current?.click()}>
