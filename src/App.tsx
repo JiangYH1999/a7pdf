@@ -238,8 +238,16 @@ function DragPreview({
 
   return (
     <div className={`page-drag-preview ${count > 1 ? "multi" : ""}`} style={{ left: position.x, top: position.y }} aria-hidden="true">
+      {count > 1 && (
+        <div className="page-drag-preview-stack">
+          {Array.from({ length: Math.min(count - 1, 4) }, (_, index) => (
+            <i key={index} style={{ transform: `translate(${(index + 1) * 5}px, ${(index + 1) * 6}px)` }} />
+          ))}
+        </div>
+      )}
       <div className="page-drag-preview-paper"><PdfCanvas page={page} scale={scale} /></div>
-      <span>{count > 1 ? `${count} 页` : sequenceNumber}</span>
+      {count > 1 && <b className="page-drag-count">{count}</b>}
+      <span>{count > 1 ? `共${count}页` : sequenceNumber}</span>
     </div>
   );
 }
@@ -369,10 +377,11 @@ function App() {
       if (previous) {
         const deltaY = previous.top - next.top;
         if (Math.abs(deltaY) > 1) {
+          element.getAnimations().forEach((animation) => animation.cancel());
           element.animate(
             [
-              { transform: `translateY(${deltaY}px)`, opacity: 0.78 },
-              { transform: "translateY(0)", opacity: 1 },
+              { transform: `translateY(${deltaY}px)` },
+              { transform: "translateY(0)" },
             ],
             { duration: 360, easing: "cubic-bezier(.16, 1, .3, 1)" },
           );
@@ -548,6 +557,12 @@ function App() {
   function registerThumbnail(pageId: string, element: HTMLDivElement | null) {
     if (element) thumbnailElementsRef.current.set(pageId, element);
     else thumbnailElementsRef.current.delete(pageId);
+  }
+
+  function captureThumbnailPositions() {
+    const positions = new Map<string, DOMRect>();
+    thumbnailElementsRef.current.forEach((element, pageId) => positions.set(pageId, element.getBoundingClientRect()));
+    thumbnailPositionsRef.current = positions;
   }
 
   function beginPageDrag(index: number, position: { x: number; y: number }) {
@@ -938,7 +953,7 @@ function App() {
             title={leftCollapsed ? "展开侧栏" : "收起侧栏"}
             onClick={() => setLeftCollapsed((value) => !value)}
           />
-          <div className="thumbnails collapsible-content" ref={thumbnailsRef}>
+          <div className="thumbnails collapsible-content" ref={thumbnailsRef} onScroll={captureThumbnailPositions}>
             {composition.length ? (
               composition.map((page, index) => {
                 const source = sources.find((item) => item.id === page.sourceId);
