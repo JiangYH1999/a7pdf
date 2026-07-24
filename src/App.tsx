@@ -6,6 +6,7 @@ import {
   Download,
   FileText,
   FilePlus2,
+  GripVertical,
   Highlighter,
   ImagePlus,
   Menu,
@@ -127,6 +128,9 @@ function Thumbnail({
   onDragStart,
   onDragOver,
   onDrop,
+  onDragEnd,
+  onPointerDragStart,
+  compositionIndex,
   isDragging,
   isDropTarget,
 }: {
@@ -138,6 +142,9 @@ function Thumbnail({
   onDragStart: () => void;
   onDragOver: () => void;
   onDrop: () => void;
+  onDragEnd: () => void;
+  onPointerDragStart: () => void;
+  compositionIndex: number;
   isDragging: boolean;
   isDropTarget: boolean;
 }) {
@@ -160,10 +167,10 @@ function Thumbnail({
   return (
     <div
       className={`thumbnail ${selected ? "selected" : ""} ${isDragging ? "dragging" : ""} ${isDropTarget ? "drop-target" : ""}`}
-      draggable
-      onDragStart={onDragStart}
+      data-composition-index={compositionIndex}
       onDragOver={(event) => {
         event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
         onDragOver();
       }}
       onDrop={(event) => {
@@ -171,6 +178,22 @@ function Thumbnail({
         onDrop();
       }}
     >
+      <button
+        className="page-drag-handle"
+        aria-label={`拖动第 ${pageNumber} 页以重新排序`}
+        title="拖动以重新排序"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          onPointerDragStart();
+        }}
+        draggable
+        onDragStart={(event) => {
+          event.preventDefault();
+          onDragStart();
+        }}
+        onDragEnd={onDragEnd}
+      ><GripVertical size={15} /></button>
       <button className="thumbnail-select" onClick={onSelect}>
       <div className="thumbnail-paper">
         <PdfCanvas page={page} scale={thumbnailScale} />
@@ -276,6 +299,7 @@ function App() {
   const [error, setError] = useState("");
   const [dropTarget, setDropTarget] = useState<DropTarget>(null);
   const [draggedPageIndex, setDraggedPageIndex] = useState<number | null>(null);
+  const [dropPageIndex, setDropPageIndex] = useState<number | null>(null);
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
   const document = activeSource?.document ?? null;
   const fileName = activeSource?.name ?? "未命名文档";
@@ -337,6 +361,37 @@ function App() {
       removeListener?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (draggedPageIndex === null) return;
+
+    const findDropTarget = (clientX: number, clientY: number) => {
+      const target = globalThis.document
+        .elementFromPoint(clientX, clientY)
+        ?.closest<HTMLElement>("[data-composition-index]");
+      const index = Number(target?.dataset.compositionIndex);
+      setDropPageIndex(Number.isInteger(index) ? index : null);
+    };
+    const finishDrag = () => {
+      if (dropPageIndex !== null && dropPageIndex !== draggedPageIndex) {
+        movePage(draggedPageIndex, dropPageIndex);
+      }
+      setDraggedPageIndex(null);
+      setDropPageIndex(null);
+    };
+    const handlePointerMove = (event: PointerEvent) => {
+      findDropTarget(event.clientX, event.clientY);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", finishDrag, { once: true });
+    window.addEventListener("pointercancel", finishDrag, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", finishDrag);
+      window.removeEventListener("pointercancel", finishDrag);
+    };
+  }, [draggedPageIndex, dropPageIndex]);
 
   useEffect(() => {
     const element = canvasScrollRef.current;
@@ -638,13 +693,20 @@ function App() {
                   onSelect={() => changePage(index + 1)}
                   onRemove={() => removePage(page.id)}
                   onDragStart={() => setDraggedPageIndex(index)}
-                  onDragOver={() => undefined}
+                  onDragOver={() => setDropPageIndex(index)}
                   onDrop={() => {
                     if (draggedPageIndex !== null) movePage(draggedPageIndex, index);
                     setDraggedPageIndex(null);
+                    setDropPageIndex(null);
                   }}
+                  onDragEnd={() => {
+                    setDraggedPageIndex(null);
+                    setDropPageIndex(null);
+                  }}
+                  onPointerDragStart={() => setDraggedPageIndex(index)}
+                  compositionIndex={index}
                   isDragging={draggedPageIndex === index}
-                  isDropTarget={draggedPageIndex !== null && draggedPageIndex !== index}
+                  isDropTarget={dropPageIndex === index && draggedPageIndex !== index}
                 />
                 );
               })
