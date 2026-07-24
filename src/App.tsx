@@ -284,6 +284,7 @@ function App() {
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const canvasAreaRef = useRef<HTMLElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
+  const thumbnailsRef = useRef<HTMLDivElement>(null);
   const libraryRef = useRef<HTMLElement>(null);
   const sourcesRef = useRef<PdfSource[]>([]);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
@@ -408,6 +409,9 @@ function App() {
   useEffect(() => {
     if (draggedPageIndex === null) return;
 
+    let lastPointer: { x: number; y: number } | null = null;
+    let scrollFrame: number | null = null;
+
     const findDropTarget = (clientX: number, clientY: number) => {
       const target = globalThis.document
         .elementFromPoint(clientX, clientY)
@@ -424,8 +428,29 @@ function App() {
       setDragPointer(null);
     };
     const handlePointerMove = (event: PointerEvent) => {
+      lastPointer = { x: event.clientX, y: event.clientY };
       setDragPointer({ x: event.clientX, y: event.clientY });
       findDropTarget(event.clientX, event.clientY);
+      if (scrollFrame === null) scrollFrame = requestAnimationFrame(autoScroll);
+    };
+    const autoScroll = () => {
+      scrollFrame = null;
+      const list = thumbnailsRef.current;
+      if (!list || !lastPointer) return;
+      const bounds = list.getBoundingClientRect();
+      if (lastPointer.x < bounds.left || lastPointer.x > bounds.right) return;
+      const edgeSize = 54;
+      const fromTop = lastPointer.y - bounds.top;
+      const fromBottom = bounds.bottom - lastPointer.y;
+      const direction = fromTop < edgeSize ? -1 : fromBottom < edgeSize ? 1 : 0;
+      if (!direction) return;
+
+      const intensity = direction < 0
+        ? Math.max(0.25, 1 - fromTop / edgeSize)
+        : Math.max(0.25, 1 - fromBottom / edgeSize);
+      list.scrollTop += direction * (4 + intensity * 12);
+      findDropTarget(lastPointer.x, lastPointer.y);
+      scrollFrame = requestAnimationFrame(autoScroll);
     };
 
     window.addEventListener("pointermove", handlePointerMove);
@@ -435,6 +460,7 @@ function App() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", finishDrag);
       window.removeEventListener("pointercancel", finishDrag);
+      if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
     };
   }, [draggedPageIndex, dropPageIndex]);
 
@@ -735,7 +761,7 @@ function App() {
             title={leftCollapsed ? "展开侧栏" : "收起侧栏"}
             onClick={() => setLeftCollapsed((value) => !value)}
           />
-          <div className="thumbnails collapsible-content">
+          <div className="thumbnails collapsible-content" ref={thumbnailsRef}>
             {composition.length ? (
               composition.map((page, index) => {
                 const source = sources.find((item) => item.id === page.sourceId);

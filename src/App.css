@@ -100,15 +100,15 @@ button { color: inherit; }
 .composition-heading { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
 .composition-heading strong { font-size: 12px; }
 .composition-heading span { color: #9b97a3; font-size: 9px; }
-.thumbnails { height: calc(100% - 53px); padding: 6px 14px 28px; overflow: auto; }
-.thumbnail { width: 100%; position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px; margin-bottom: 10px; border: 1px solid transparent; border-radius: 11px; background: transparent; cursor: grab; touch-action: none; user-select: none; transition: transform 180ms ease, opacity 180ms ease, border-color 180ms ease; }
+.thumbnails { height: calc(100% - 53px); padding: 5px 18px 24px; overflow: auto; }
+.thumbnail { width: 100%; position: relative; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 5px; margin-bottom: 5px; border: 1px solid transparent; border-radius: 9px; background: transparent; cursor: grab; touch-action: none; user-select: none; transition: transform 180ms ease, opacity 180ms ease, border-color 180ms ease; }
 .thumbnail:hover { background: #f4f2f6; }
 .thumbnail.selected { border-color: var(--theme-lavender); background: #f4f3fc; }
 .thumbnail.dragging { opacity: .18; cursor: grabbing; }
 .thumbnail.drop-target { border-top: 3px solid var(--theme-yellow); }
-.thumbnail-select { width: 100%; padding: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; border: 0; background: transparent; cursor: pointer; }
-.thumbnail-paper { width: 132px; height: 154px; display: grid; place-items: center; overflow: hidden; background: #f0eef2; border-radius: 4px; }
-.thumbnail canvas { max-width: 118px; max-height: 142px; width: auto !important; height: auto !important; display: block; background: white; box-shadow: 0 4px 13px #302a3c1a; }
+.thumbnail-select { width: 100%; padding: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; border: 0; background: transparent; cursor: pointer; }
+.thumbnail-paper { width: 96px; height: 92px; display: grid; place-items: center; overflow: hidden; background: #f0eef2; border-radius: 4px; }
+.thumbnail canvas { max-width: 86px; max-height: 82px; width: auto !important; height: auto !important; display: block; background: white; box-shadow: 0 4px 13px #302a3c1a; }
 .thumbnail span { font-size: 10px; font-weight: 600; color: #827e8b; }
 .page-drag-preview {
   position: fixed; z-index: 30; width: 108px; display: flex; flex-direction: column; align-items: center; gap: 5px;
