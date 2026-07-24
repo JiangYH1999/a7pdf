@@ -57,6 +57,23 @@ const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "comment", label: "批注", icon: MessageSquareText },
 ];
 
+function positionHits(
+  position: { x: number; y: number },
+  bounds: DOMRect | undefined,
+) {
+  if (!bounds) return false;
+  const scale = window.devicePixelRatio || 1;
+  return [
+    position,
+    { x: position.x / scale, y: position.y / scale },
+  ].some(({ x, y }) => (
+    x >= bounds.left
+    && x <= bounds.right
+    && y >= bounds.top
+    && y <= bounds.bottom
+  ));
+}
+
 function PdfCanvas({
   page,
   scale,
@@ -238,25 +255,10 @@ function App() {
     getCurrentWebview()
       .onDragDropEvent(async (event) => {
         if (event.payload.type === "over") {
-          const scale = window.devicePixelRatio || 1;
-          const x = event.payload.position.x / scale;
-          const y = event.payload.position.y / scale;
           const libraryBounds = libraryRef.current?.getBoundingClientRect();
           const canvasBounds = canvasAreaRef.current?.getBoundingClientRect();
-          const overLibrary = Boolean(
-            libraryBounds
-            && x >= libraryBounds.left
-            && x <= libraryBounds.right
-            && y >= libraryBounds.top
-            && y <= libraryBounds.bottom
-          );
-          const overCanvas = Boolean(
-            canvasBounds
-            && x >= canvasBounds.left
-            && x <= canvasBounds.right
-            && y >= canvasBounds.top
-            && y <= canvasBounds.bottom
-          );
+          const overLibrary = positionHits(event.payload.position, libraryBounds);
+          const overCanvas = positionHits(event.payload.position, canvasBounds);
           setDropTarget(
             overLibrary ? "library" : overCanvas && sourcesRef.current.length === 0 ? "canvas" : null,
           );
@@ -269,25 +271,10 @@ function App() {
         }
         if (event.payload.type !== "drop") return;
 
-        const scale = window.devicePixelRatio || 1;
-        const x = event.payload.position.x / scale;
-        const y = event.payload.position.y / scale;
         const libraryBounds = libraryRef.current?.getBoundingClientRect();
         const canvasBounds = canvasAreaRef.current?.getBoundingClientRect();
-        const droppedOnLibrary = Boolean(
-          libraryBounds
-          && x >= libraryBounds.left
-          && x <= libraryBounds.right
-          && y >= libraryBounds.top
-          && y <= libraryBounds.bottom
-        );
-        const droppedOnCanvas = Boolean(
-          canvasBounds
-          && x >= canvasBounds.left
-          && x <= canvasBounds.right
-          && y >= canvasBounds.top
-          && y <= canvasBounds.bottom
-        );
+        const droppedOnLibrary = positionHits(event.payload.position, libraryBounds);
+        const droppedOnCanvas = positionHits(event.payload.position, canvasBounds);
         const pdfPaths = event.payload.paths.filter((path) => path.toLowerCase().endsWith(".pdf"));
         setDropTarget(null);
         if (!pdfPaths.length) {
@@ -295,7 +282,7 @@ function App() {
           return;
         }
         if (!droppedOnLibrary && (!droppedOnCanvas || sourcesRef.current.length > 0)) {
-          setError("如需继续添加 PDF，请拖放到右侧的原始 PDF 列表。");
+          setError("如需继续添加 PDF，请拖放到右侧的资源管理区域。");
           return;
         }
         await openNativePaths(pdfPaths);
@@ -338,6 +325,9 @@ function App() {
     if (!file) return;
     setLoading(true);
     setError("");
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
     try {
       const data = new Uint8Array(await file.arrayBuffer());
       const loadedDocument = await getDocument({ data }).promise;
@@ -352,6 +342,9 @@ function App() {
   async function openNativePaths(paths: string[]) {
     setLoading(true);
     setError("");
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
     try {
       for (const path of paths) {
         const data = await invoke<number[]>("read_pdf_file", { path });
@@ -386,7 +379,7 @@ function App() {
       return;
     }
     if (target === "canvas" && sources.length > 0) {
-      setError("如需继续添加 PDF，请拖放到右侧的原始 PDF 列表。");
+      setError("如需继续添加 PDF，请拖放到右侧的资源管理区域。");
       return;
     }
     void Promise.all(pdfFiles.map((file) => openFile(file)));
@@ -452,7 +445,7 @@ function App() {
           <div className="brand-mark">A7</div>
           <div>
             <strong>A7PDF</strong>
-            <span>轻量 PDF 编辑器</span>
+            <span>PDF 编辑器</span>
           </div>
         </div>
         <div className="document-title">
@@ -492,6 +485,12 @@ function App() {
           <button onClick={() => setZoom((value) => Math.min(180, value + 10))}><Plus size={16} /></button>
         </div>
       </nav>
+      {loading && (
+        <div className="import-progress" role="status" aria-live="polite">
+          <span />
+          <strong>正在读取 PDF 文件…</strong>
+        </div>
+      )}
 
       <div className="workspace">
         <aside className="sidebar pages-panel">
@@ -549,7 +548,7 @@ function App() {
           }}
         >
           <div className="canvas-scroll" ref={canvasScrollRef} onScroll={updateVisiblePage}>
-            {loading ? (
+            {loading && !document ? (
               <div className="loading-card"><Circle className="spinner" size={28} />正在打开文档…</div>
             ) : document ? (
               <div className="continuous-document">
@@ -610,7 +609,7 @@ function App() {
         >
           <div className="library-header">
             <div>
-              <span>原始 PDF</span>
+              <span>资源管理</span>
               <small>{sources.length} 个文件</small>
             </div>
             <button className="icon-button add-pdf-button" onClick={() => libraryInputRef.current?.click()} aria-label="添加 PDF">
@@ -637,7 +636,7 @@ function App() {
             {!sources.length && (
               <button className="library-empty" onClick={() => libraryInputRef.current?.click()}>
                 <FilePlus2 size={24} />
-                <strong>添加原始 PDF</strong>
+                <strong>添加 PDF 文件</strong>
                 <span>拖放到这里，可继续加入文件</span>
               </button>
             )}
