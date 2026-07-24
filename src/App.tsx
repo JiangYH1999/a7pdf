@@ -492,9 +492,8 @@ function App() {
     const next = [...composition];
     next.splice(lastSelectedIndex + 1, 0, ...copies);
     commitComposition(next);
-    setSelectedPageIds(new Set(copies.map((page) => page.id)));
-    setSelectionAnchorIndex(lastSelectedIndex + 1);
-    setPageNumber(lastSelectedIndex + 2);
+    // Keep the originals selected so the inserted copies are visibly placed after them.
+    setSelectedPageIds(new Set(selected.map((page) => page.id)));
   }
 
   function deleteSelectedPages(fallbackPageId?: string) {
