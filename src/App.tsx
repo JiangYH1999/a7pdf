@@ -6,7 +6,6 @@ import {
   Download,
   FileText,
   FilePlus2,
-  GripVertical,
   Highlighter,
   ImagePlus,
   Menu,
@@ -125,10 +124,6 @@ function Thumbnail({
   selected,
   onSelect,
   onRemove,
-  onDragStart,
-  onDragOver,
-  onDrop,
-  onDragEnd,
   onPointerDragStart,
   compositionIndex,
   isDragging,
@@ -139,10 +134,6 @@ function Thumbnail({
   selected: boolean;
   onSelect: () => void;
   onRemove: () => void;
-  onDragStart: () => void;
-  onDragOver: () => void;
-  onDrop: () => void;
-  onDragEnd: () => void;
   onPointerDragStart: () => void;
   compositionIndex: number;
   isDragging: boolean;
@@ -168,32 +159,12 @@ function Thumbnail({
     <div
       className={`thumbnail ${selected ? "selected" : ""} ${isDragging ? "dragging" : ""} ${isDropTarget ? "drop-target" : ""}`}
       data-composition-index={compositionIndex}
-      onDragOver={(event) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = "move";
-        onDragOver();
-      }}
-      onDrop={(event) => {
-        event.preventDefault();
-        onDrop();
+      onPointerDown={(event) => {
+        if ((event.target as HTMLElement).closest(".page-remove")) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        onPointerDragStart();
       }}
     >
-      <button
-        className="page-drag-handle"
-        aria-label={`拖动第 ${pageNumber} 页以重新排序`}
-        title="拖动以重新排序"
-        onPointerDown={(event) => {
-          event.preventDefault();
-          event.currentTarget.setPointerCapture(event.pointerId);
-          onPointerDragStart();
-        }}
-        draggable
-        onDragStart={(event) => {
-          event.preventDefault();
-          onDragStart();
-        }}
-        onDragEnd={onDragEnd}
-      ><GripVertical size={15} /></button>
       <button className="thumbnail-select" onClick={onSelect}>
       <div className="thumbnail-paper">
         <PdfCanvas page={page} scale={thumbnailScale} />
@@ -288,6 +259,11 @@ function App() {
   const scrollFrameRef = useRef<number | null>(null);
   const [sources, setSources] = useState<PdfSource[]>([]);
   const [composition, setComposition] = useState<ComposedPage[]>([]);
+  const compositionRef = useRef<ComposedPage[]>([]);
+  const historyRef = useRef<ComposedPage[][]>([[]]);
+  const historyIndexRef = useRef(0);
+  const [historyIndex, setHistoryIndex] = useState(0);
+  const [historyLength, setHistoryLength] = useState(1);
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [zoom, setZoom] = useState(100);
@@ -362,6 +338,41 @@ function App() {
     };
   }, []);
 
+  function commitComposition(next: ComposedPage[], resetHistory = false) {
+    compositionRef.current = next;
+    setComposition(next);
+    if (resetHistory) {
+      historyRef.current = [next];
+      historyIndexRef.current = 0;
+    } else {
+      const nextHistory = [...historyRef.current.slice(0, historyIndexRef.current + 1), next];
+      historyRef.current = nextHistory;
+      historyIndexRef.current = nextHistory.length - 1;
+    }
+    setHistoryIndex(historyIndexRef.current);
+    setHistoryLength(historyRef.current.length);
+  }
+
+  function undoComposition() {
+    if (historyIndexRef.current === 0) return;
+    historyIndexRef.current -= 1;
+    const previous = historyRef.current[historyIndexRef.current];
+    compositionRef.current = previous;
+    setComposition(previous);
+    setHistoryIndex(historyIndexRef.current);
+    setPageNumber((current) => Math.min(Math.max(current, 1), Math.max(previous.length, 1)));
+  }
+
+  function redoComposition() {
+    if (historyIndexRef.current >= historyRef.current.length - 1) return;
+    historyIndexRef.current += 1;
+    const next = historyRef.current[historyIndexRef.current];
+    compositionRef.current = next;
+    setComposition(next);
+    setHistoryIndex(historyIndexRef.current);
+    setPageNumber((current) => Math.min(Math.max(current, 1), Math.max(next.length, 1)));
+  }
+
   useEffect(() => {
     if (draggedPageIndex === null) return;
 
@@ -413,6 +424,17 @@ function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!event.metaKey && !event.ctrlKey) return;
+      if (event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redoComposition();
+        else undoComposition();
+        return;
+      }
+      if (event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        redoComposition();
+        return;
+      }
       if (event.key === "+" || event.key === "=") {
         event.preventDefault();
         setZoom((value) => Math.min(400, value + 10));
@@ -473,8 +495,8 @@ function App() {
       data,
     };
     setSources((current) => [...current, source]);
-    setComposition((current) => [
-      ...current,
+    commitComposition([
+      ...compositionRef.current,
       ...Array.from({ length: loadedDocument.numPages }, (_, index) => ({
         id: `${source.id}-${index + 1}`,
         sourceId: source.id,
@@ -536,31 +558,31 @@ function App() {
   }
 
   function removePage(pageId: string) {
-    setComposition((current) => current.filter((page) => page.id !== pageId));
+    const next = compositionRef.current.filter((page) => page.id !== pageId);
+    commitComposition(next);
     setPageNumber((current) => Math.max(1, Math.min(current, composition.length - 1)));
   }
 
   function movePage(from: number, to: number) {
     if (from === to) return;
-    setComposition((current) => {
-      const next = [...current];
-      const [moved] = next.splice(from, 1);
-      next.splice(from < to ? to - 1 : to, 0, moved);
-      return next;
-    });
-    setPageNumber((from < to ? to - 1 : to) + 1);
+    const next = [...compositionRef.current];
+    const [moved] = next.splice(from, 1);
+    const target = from < to ? to - 1 : to;
+    next.splice(target, 0, moved);
+    commitComposition(next);
+    setPageNumber(target + 1);
   }
 
   function removeSource(sourceId: string) {
     const remaining = sources.filter((source) => source.id !== sourceId);
     setSources(remaining);
-    setComposition((current) => current.filter((page) => page.sourceId !== sourceId));
+    commitComposition(compositionRef.current.filter((page) => page.sourceId !== sourceId), true);
     if (activeSourceId === sourceId) setActiveSourceId(remaining[0]?.id ?? null);
   }
 
   function clearSources() {
     setSources([]);
-    setComposition([]);
+    commitComposition([], true);
     setActiveSourceId(null);
     setPageNumber(1);
   }
@@ -626,8 +648,8 @@ function App() {
           <span>{document ? "已在本地打开" : "准备就绪"}</span>
         </div>
         <div className="title-actions">
-          <button className="icon-button" aria-label="撤销" disabled><Undo2 size={18} /></button>
-          <button className="icon-button" aria-label="重做" disabled><Redo2 size={18} /></button>
+          <button className="icon-button" aria-label="撤销" title="撤销（⌘/Ctrl Z）" disabled={historyIndex === 0} onClick={undoComposition}><Undo2 size={18} /></button>
+          <button className="icon-button" aria-label="重做" title="重做（⌘/Ctrl Shift Z）" disabled={historyIndex >= historyLength - 1} onClick={redoComposition}><Redo2 size={18} /></button>
           <button className="export-button" disabled={!composition.length || exporting} onClick={exportComposition}>
             <Download size={17} />
             {exporting ? "正在导出" : "导出"}
@@ -692,17 +714,6 @@ function App() {
                   selected={pageNumber === index + 1}
                   onSelect={() => changePage(index + 1)}
                   onRemove={() => removePage(page.id)}
-                  onDragStart={() => setDraggedPageIndex(index)}
-                  onDragOver={() => setDropPageIndex(index)}
-                  onDrop={() => {
-                    if (draggedPageIndex !== null) movePage(draggedPageIndex, index);
-                    setDraggedPageIndex(null);
-                    setDropPageIndex(null);
-                  }}
-                  onDragEnd={() => {
-                    setDraggedPageIndex(null);
-                    setDropPageIndex(null);
-                  }}
                   onPointerDragStart={() => setDraggedPageIndex(index)}
                   compositionIndex={index}
                   isDragging={draggedPageIndex === index}
