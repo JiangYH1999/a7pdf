@@ -100,6 +100,12 @@ function Thumbnail({
   onSelect: () => void;
 }) {
   const [page, setPage] = useState<PDFPageProxy | null>(null);
+  const thumbnailScale = page
+    ? Math.min(
+        118 / page.getViewport({ scale: 1 }).width,
+        142 / page.getViewport({ scale: 1 }).height,
+      )
+    : 0.1;
 
   useEffect(() => {
     let active = true;
@@ -112,7 +118,7 @@ function Thumbnail({
   return (
     <button className={`thumbnail ${selected ? "selected" : ""}`} onClick={onSelect}>
       <div className="thumbnail-paper">
-        <PdfCanvas page={page} scale={0.18} />
+        <PdfCanvas page={page} scale={thumbnailScale} />
       </div>
       <span>{pageNumber}</span>
     </button>
@@ -148,11 +154,13 @@ function EmptyDocument({ onOpen }: { onOpen: () => void }) {
 
 function App() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const canvasScrollRef = useRef<HTMLDivElement>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
   const [page, setPage] = useState<PDFPageProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [fileName, setFileName] = useState("未命名文档");
-  const [zoom, setZoom] = useState(92);
+  const [zoom, setZoom] = useState(100);
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
   const [activeTool, setActiveTool] = useState<Tool>("select");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -208,6 +216,23 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const element = canvasScrollRef.current;
+    if (!element) return;
+
+    const updateSize = () => {
+      setCanvasSize({
+        width: element.clientWidth,
+        height: element.clientHeight,
+      });
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
     if (!document) {
       setPage(null);
       return;
@@ -240,6 +265,15 @@ function App() {
     if (!document) return;
     setPageNumber(Math.min(Math.max(next, 1), document.numPages));
   }
+
+  const pageViewport = page?.getViewport({ scale: 1 });
+  const fitScale = pageViewport
+    ? Math.min(
+        Math.max(canvasSize.width - 96, 240) / pageViewport.width,
+        Math.max(canvasSize.height - 96, 240) / pageViewport.height,
+      )
+    : 1;
+  const renderedScale = fitScale * (zoom / 100);
 
   return (
     <main
@@ -342,25 +376,27 @@ function App() {
         </aside>
 
         <section className="canvas-area">
-          {loading ? (
-            <div className="loading-card"><Circle className="spinner" size={28} />正在打开文档…</div>
-          ) : document ? (
-            <>
+          <div className="canvas-scroll" ref={canvasScrollRef}>
+            {loading ? (
+              <div className="loading-card"><Circle className="spinner" size={28} />正在打开文档…</div>
+            ) : document ? (
               <div className="page-stage">
-                <PdfCanvas page={page} scale={zoom / 100} className="main-pdf-page" />
+                <PdfCanvas page={page} scale={renderedScale} className="main-pdf-page" />
               </div>
-              <div className="page-navigation">
-                <button onClick={() => changePage(pageNumber - 1)} disabled={pageNumber === 1}>
-                  <ChevronLeft size={16} />
-                </button>
-                <span><strong>{pageNumber}</strong> / {document.numPages}</span>
-                <button onClick={() => changePage(pageNumber + 1)} disabled={pageNumber === document.numPages}>
-                  <ChevronRight size={16} />
-                </button>
-              </div>
-            </>
-          ) : (
-            <EmptyDocument onOpen={() => inputRef.current?.click()} />
+            ) : (
+              <EmptyDocument onOpen={() => inputRef.current?.click()} />
+            )}
+          </div>
+          {document && (
+            <div className="page-navigation">
+              <button onClick={() => changePage(pageNumber - 1)} disabled={pageNumber === 1}>
+                <ChevronLeft size={16} />
+              </button>
+              <span><strong>{pageNumber}</strong> / {document.numPages}</span>
+              <button onClick={() => changePage(pageNumber + 1)} disabled={pageNumber === document.numPages}>
+                <ChevronRight size={16} />
+              </button>
+            </div>
           )}
           {error && <div className="error-toast">{error}</div>}
           {isNativeDragging && (
