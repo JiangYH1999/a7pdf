@@ -171,12 +171,10 @@ function App() {
           setIsNativeDragging(true);
           return;
         }
-        if (event.payload.type === "leave") {
-          setIsNativeDragging(false);
-          return;
-        }
 
         setIsNativeDragging(false);
+        if (event.payload.type !== "drop") return;
+
         const pdfPath = event.payload.paths.find((path) => path.toLowerCase().endsWith(".pdf"));
         if (!pdfPath) {
           setError("请拖入一个 PDF 文件。");
@@ -245,11 +243,17 @@ function App() {
 
   return (
     <main
-      className={`app-shell ${isNativeDragging ? "native-dragging" : ""}`}
-      onDragOver={(event) => event.preventDefault()}
+      className="app-shell"
+      onDragOver={(event) => {
+        const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
+        if (!tauriWindow.__TAURI_INTERNALS__) event.preventDefault();
+      }}
       onDrop={(event) => {
-        event.preventDefault();
-        openFile(event.dataTransfer.files[0]);
+        const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
+        if (!tauriWindow.__TAURI_INTERNALS__) {
+          event.preventDefault();
+          openFile(event.dataTransfer.files[0]);
+        }
       }}
     >
       <input
@@ -359,6 +363,13 @@ function App() {
             <EmptyDocument onOpen={() => inputRef.current?.click()} />
           )}
           {error && <div className="error-toast">{error}</div>}
+          {isNativeDragging && (
+            <div className="native-drop-overlay">
+              <FilePlus2 size={34} />
+              <strong>松开以打开 PDF</strong>
+              <span>文件只会在本地处理</span>
+            </div>
+          )}
         </section>
 
         <aside className="sidebar properties-panel">
@@ -369,8 +380,8 @@ function App() {
           <section className="property-section">
             <label>样式</label>
             <div className="color-row">
-              <button className="color-swatch selected" style={{ background: "#6558e8" }} />
-              <button className="color-swatch" style={{ background: "#f2c94c" }} />
+              <button className="color-swatch selected" style={{ background: "#AFADE6" }} />
+              <button className="color-swatch" style={{ background: "#E4E6AD" }} />
               <button className="color-swatch" style={{ background: "#ef6a7a" }} />
               <button className="color-swatch" style={{ background: "#42b59d" }} />
               <button className="add-color"><Plus size={15} /></button>
@@ -392,13 +403,6 @@ function App() {
           </div>
         </aside>
       </div>
-      {isNativeDragging && (
-        <div className="native-drop-overlay">
-          <FilePlus2 size={34} />
-          <strong>松开以打开 PDF</strong>
-          <span>文件只会在本地处理</span>
-        </div>
-      )}
     </main>
   );
 }
