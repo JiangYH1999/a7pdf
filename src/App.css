@@ -114,7 +114,7 @@ button { color: inherit; }
 .page-drag-preview {
   position: fixed; z-index: 30; width: 108px; display: flex; flex-direction: column; align-items: center; gap: 5px;
   padding: 7px; border: 1px solid #d8d5df; border-radius: 10px; background: rgba(255,255,255,.9); box-shadow: 0 15px 34px #302a3c36;
-  pointer-events: none; opacity: .72; transform: translate(-50%, -48%) scale(.84); transform-origin: center; will-change: left, top, transform; animation: page-drag-preview-in 190ms cubic-bezier(.16, 1, .3, 1) both;
+  pointer-events: none; opacity: .72; transform: translate(-50%, -48%) scale(.84); transform-origin: center; will-change: left, top, transform; animation: page-drag-preview-in 380ms cubic-bezier(.16, 1, .3, 1) both;
 }
 @keyframes page-drag-preview-in {
   from { opacity: 0; transform: translate(-50%, -40%) scale(.58); filter: blur(2px); }

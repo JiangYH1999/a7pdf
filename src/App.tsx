@@ -340,6 +340,7 @@ function App() {
   const [dragPointer, setDragPointer] = useState<{ x: number; y: number } | null>(null);
   const [selectedPageIds, setSelectedPageIds] = useState<Set<string>>(new Set());
   const [selectionAnchorIndex, setSelectionAnchorIndex] = useState<number | null>(null);
+  const [selectionFocusIndex, setSelectionFocusIndex] = useState<number | null>(null);
   const [pageContextMenu, setPageContextMenu] = useState<{ x: number; y: number; pageId: string } | null>(null);
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
   const document = activeSource?.document ?? null;
@@ -451,6 +452,7 @@ function App() {
     const [start, end] = [Math.min(anchor, index), Math.max(anchor, index)];
     setSelectedPageIds(new Set(composition.slice(start, end + 1).map((page) => page.id)));
     setSelectionAnchorIndex(anchor);
+    setSelectionFocusIndex(index);
   }
 
   function selectCompositionPage(index: number, event: ReactMouseEvent<HTMLElement>) {
@@ -466,11 +468,13 @@ function App() {
         return next;
       });
       setSelectionAnchorIndex(index);
+      setSelectionFocusIndex(index);
     } else {
       setSelectedPageIds(new Set([page.id]));
       setSelectionAnchorIndex(index);
+      setSelectionFocusIndex(index);
+      changePage(index + 1);
     }
-    changePage(index + 1);
   }
 
   function openPageContextMenu(index: number, position: { x: number; y: number }) {
@@ -479,6 +483,7 @@ function App() {
     if (!selectedPageIds.has(page.id)) {
       setSelectedPageIds(new Set([page.id]));
       setSelectionAnchorIndex(index);
+      setSelectionFocusIndex(index);
     }
     setPageContextMenu({ ...position, pageId: page.id });
   }
@@ -503,6 +508,7 @@ function App() {
     commitComposition(next);
     setSelectedPageIds(new Set());
     setSelectionAnchorIndex(null);
+    setSelectionFocusIndex(null);
     setPageNumber((current) => Math.max(1, Math.min(current, next.length)));
   }
 
@@ -586,15 +592,16 @@ function App() {
       if (event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && composition.length) {
         event.preventDefault();
         const direction = event.key === "ArrowUp" ? -1 : 1;
-        const nextIndex = Math.max(0, Math.min(composition.length - 1, pageNumber - 1 + direction));
-        selectPagesThrough(nextIndex, selectionAnchorIndex ?? pageNumber - 1);
-        changePage(nextIndex + 1);
+        const focus = selectionFocusIndex ?? pageNumber - 1;
+        const nextIndex = Math.max(0, Math.min(composition.length - 1, focus + direction));
+        selectPagesThrough(nextIndex, selectionAnchorIndex ?? focus);
         return;
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
         event.preventDefault();
         setSelectedPageIds(new Set(composition.map((page) => page.id)));
         setSelectionAnchorIndex(0);
+        setSelectionFocusIndex(composition.length - 1);
         return;
       }
       if ((event.key === "Backspace" || event.key === "Delete") && selectedPageIds.size) {
@@ -627,7 +634,7 @@ function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [composition, pageNumber, selectedPageIds, selectionAnchorIndex]);
+  }, [composition, pageNumber, selectedPageIds, selectionAnchorIndex, selectionFocusIndex]);
 
   async function openFile(file?: File) {
     if (!file) return;
