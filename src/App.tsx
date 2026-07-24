@@ -134,7 +134,7 @@ function Thumbnail({
   selected: boolean;
   onSelect: () => void;
   onRemove: () => void;
-  onPointerDragStart: () => void;
+  onPointerDragStart: (position: { x: number; y: number }) => void;
   compositionIndex: number;
   isDragging: boolean;
   isDropTarget: boolean;
@@ -162,7 +162,7 @@ function Thumbnail({
       onPointerDown={(event) => {
         if ((event.target as HTMLElement).closest(".page-remove")) return;
         event.currentTarget.setPointerCapture(event.pointerId);
-        onPointerDragStart();
+        onPointerDragStart({ x: event.clientX, y: event.clientY });
       }}
     >
       <button className="thumbnail-select" onClick={onSelect}>
@@ -174,6 +174,37 @@ function Thumbnail({
       <button className="page-remove" onClick={onRemove} aria-label={`删除第 ${pageNumber} 页`} title="从编排中删除">
         <Trash2 size={12} />
       </button>
+    </div>
+  );
+}
+
+function DragPreview({
+  document,
+  pageNumber,
+  position,
+}: {
+  document: PDFDocumentProxy;
+  pageNumber: number;
+  position: { x: number; y: number };
+}) {
+  const [page, setPage] = useState<PDFPageProxy | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    document.getPage(pageNumber).then((loaded) => active && setPage(loaded));
+    return () => {
+      active = false;
+    };
+  }, [document, pageNumber]);
+
+  const scale = page
+    ? Math.min(92 / page.getViewport({ scale: 1 }).width, 112 / page.getViewport({ scale: 1 }).height)
+    : 0.1;
+
+  return (
+    <div className="page-drag-preview" style={{ left: position.x, top: position.y }} aria-hidden="true">
+      <div className="page-drag-preview-paper"><PdfCanvas page={page} scale={scale} /></div>
+      <span>{pageNumber}</span>
     </div>
   );
 }
@@ -276,6 +307,7 @@ function App() {
   const [dropTarget, setDropTarget] = useState<DropTarget>(null);
   const [draggedPageIndex, setDraggedPageIndex] = useState<number | null>(null);
   const [dropPageIndex, setDropPageIndex] = useState<number | null>(null);
+  const [dragPointer, setDragPointer] = useState<{ x: number; y: number } | null>(null);
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
   const document = activeSource?.document ?? null;
   const fileName = activeSource?.name ?? "未命名文档";
@@ -389,8 +421,10 @@ function App() {
       }
       setDraggedPageIndex(null);
       setDropPageIndex(null);
+      setDragPointer(null);
     };
     const handlePointerMove = (event: PointerEvent) => {
+      setDragPointer({ x: event.clientX, y: event.clientY });
       findDropTarget(event.clientX, event.clientY);
     };
 
@@ -714,7 +748,10 @@ function App() {
                   selected={pageNumber === index + 1}
                   onSelect={() => changePage(index + 1)}
                   onRemove={() => removePage(page.id)}
-                  onPointerDragStart={() => setDraggedPageIndex(index)}
+                  onPointerDragStart={(position) => {
+                    setDragPointer(position);
+                    setDraggedPageIndex(index);
+                  }}
                   compositionIndex={index}
                   isDragging={draggedPageIndex === index}
                   isDropTarget={dropPageIndex === index && draggedPageIndex !== index}
@@ -864,6 +901,17 @@ function App() {
           </div>
         </aside>
       </div>
+      {draggedPageIndex !== null && dragPointer && (() => {
+        const draggedPage = composition[draggedPageIndex];
+        const source = draggedPage && sources.find((item) => item.id === draggedPage.sourceId);
+        return source && (
+          <DragPreview
+            document={source.document}
+            pageNumber={draggedPage.pageNumber}
+            position={dragPointer}
+          />
+        );
+      })()}
     </main>
   );
 }
