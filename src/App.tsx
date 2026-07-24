@@ -617,13 +617,13 @@ function App() {
               <strong>页面编排</strong>
               <span>{composition.length} 页</span>
             </div>
-            <button
-              className="panel-toggle"
-              aria-label={leftCollapsed ? "展开侧栏" : "收起侧栏"}
-              title={leftCollapsed ? "展开侧栏" : "收起侧栏"}
-              onClick={() => setLeftCollapsed((value) => !value)}
-            />
           </div>
+          <button
+            className="panel-toggle"
+            aria-label={leftCollapsed ? "展开侧栏" : "收起侧栏"}
+            title={leftCollapsed ? "展开侧栏" : "收起侧栏"}
+            onClick={() => setLeftCollapsed((value) => !value)}
+          />
           <div className="thumbnails collapsible-content">
             {composition.length ? (
               composition.map((page, index) => {
