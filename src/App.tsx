@@ -4,6 +4,7 @@ import {
   ChevronRight,
   Circle,
   Download,
+  FileText,
   FilePlus2,
   Highlighter,
   ImagePlus,
@@ -12,6 +13,7 @@ import {
   Minus,
   MousePointer2,
   PanelLeftClose,
+  PanelLeftOpen,
   PenLine,
   Plus,
   Redo2,
@@ -37,6 +39,12 @@ import "./App.css";
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
 type Tool = "select" | "text" | "highlight" | "draw" | "shape" | "image" | "sign" | "comment";
+type DropTarget = "canvas" | "library" | null;
+type PdfSource = {
+  id: string;
+  name: string;
+  document: PDFDocumentProxy;
+};
 
 const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "select", label: "选择", icon: MousePointer2 },
@@ -195,18 +203,30 @@ function EmptyDocument({ onOpen }: { onOpen: () => void }) {
 
 function App() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const libraryInputRef = useRef<HTMLInputElement>(null);
+  const canvasAreaRef = useRef<HTMLElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
+  const libraryRef = useRef<HTMLElement>(null);
+  const sourcesRef = useRef<PdfSource[]>([]);
   const pageElementsRef = useRef(new Map<number, HTMLDivElement>());
   const scrollFrameRef = useRef<number | null>(null);
-  const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
+  const [sources, setSources] = useState<PdfSource[]>([]);
+  const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
-  const [fileName, setFileName] = useState("未命名文档");
   const [zoom, setZoom] = useState(100);
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
   const [activeTool, setActiveTool] = useState<Tool>("select");
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [isNativeDragging, setIsNativeDragging] = useState(false);
+  const [dropTarget, setDropTarget] = useState<DropTarget>(null);
+  const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
+  const document = activeSource?.document ?? null;
+  const fileName = activeSource?.name ?? "未命名文档";
+
+  useEffect(() => {
+    sourcesRef.current = sources;
+  }, [sources]);
 
   useEffect(() => {
     const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
@@ -218,32 +238,67 @@ function App() {
     getCurrentWebview()
       .onDragDropEvent(async (event) => {
         if (event.payload.type === "over") {
-          setIsNativeDragging(true);
+          const scale = window.devicePixelRatio || 1;
+          const x = event.payload.position.x / scale;
+          const y = event.payload.position.y / scale;
+          const libraryBounds = libraryRef.current?.getBoundingClientRect();
+          const canvasBounds = canvasAreaRef.current?.getBoundingClientRect();
+          const overLibrary = Boolean(
+            libraryBounds
+            && x >= libraryBounds.left
+            && x <= libraryBounds.right
+            && y >= libraryBounds.top
+            && y <= libraryBounds.bottom
+          );
+          const overCanvas = Boolean(
+            canvasBounds
+            && x >= canvasBounds.left
+            && x <= canvasBounds.right
+            && y >= canvasBounds.top
+            && y <= canvasBounds.bottom
+          );
+          setDropTarget(
+            overLibrary ? "library" : overCanvas && sourcesRef.current.length === 0 ? "canvas" : null,
+          );
           return;
         }
 
-        setIsNativeDragging(false);
+        if (event.payload.type === "leave") {
+          setDropTarget(null);
+          return;
+        }
         if (event.payload.type !== "drop") return;
 
-        const pdfPath = event.payload.paths.find((path) => path.toLowerCase().endsWith(".pdf"));
-        if (!pdfPath) {
+        const scale = window.devicePixelRatio || 1;
+        const x = event.payload.position.x / scale;
+        const y = event.payload.position.y / scale;
+        const libraryBounds = libraryRef.current?.getBoundingClientRect();
+        const canvasBounds = canvasAreaRef.current?.getBoundingClientRect();
+        const droppedOnLibrary = Boolean(
+          libraryBounds
+          && x >= libraryBounds.left
+          && x <= libraryBounds.right
+          && y >= libraryBounds.top
+          && y <= libraryBounds.bottom
+        );
+        const droppedOnCanvas = Boolean(
+          canvasBounds
+          && x >= canvasBounds.left
+          && x <= canvasBounds.right
+          && y >= canvasBounds.top
+          && y <= canvasBounds.bottom
+        );
+        const pdfPaths = event.payload.paths.filter((path) => path.toLowerCase().endsWith(".pdf"));
+        setDropTarget(null);
+        if (!pdfPaths.length) {
           setError("请拖入一个 PDF 文件。");
           return;
         }
-
-        setLoading(true);
-        setError("");
-        try {
-          const data = await invoke<number[]>("read_pdf_file", { path: pdfPath });
-          const loadedDocument = await getDocument({ data: new Uint8Array(data) }).promise;
-          setDocument(loadedDocument);
-          setFileName(pdfPath.split(/[\\/]/).pop()?.replace(/\.pdf$/i, "") || "未命名文档");
-          setPageNumber(1);
-        } catch {
-          setError("无法打开此 PDF，请确认文件没有损坏或加密。");
-        } finally {
-          setLoading(false);
+        if (!droppedOnLibrary && (!droppedOnCanvas || sourcesRef.current.length > 0)) {
+          setError("如需继续添加 PDF，请拖放到右侧的原始 PDF 列表。");
+          return;
         }
+        await openNativePaths(pdfPaths);
       })
       .then((unlisten) => {
         if (disposed) unlisten();
@@ -286,14 +341,55 @@ function App() {
     try {
       const data = new Uint8Array(await file.arrayBuffer());
       const loadedDocument = await getDocument({ data }).promise;
-      setDocument(loadedDocument);
-      setFileName(file.name.replace(/\.pdf$/i, ""));
-      setPageNumber(1);
+      addSource(file.name, loadedDocument);
     } catch {
       setError("无法打开此 PDF，请确认文件没有损坏或加密。");
     } finally {
       setLoading(false);
     }
+  }
+
+  async function openNativePaths(paths: string[]) {
+    setLoading(true);
+    setError("");
+    try {
+      for (const path of paths) {
+        const data = await invoke<number[]>("read_pdf_file", { path });
+        const loadedDocument = await getDocument({ data: new Uint8Array(data) }).promise;
+        addSource(path.split(/[\\/]/).pop() || "未命名文档.pdf", loadedDocument);
+      }
+    } catch {
+      setError("无法打开此 PDF，请确认文件没有损坏或加密。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function addSource(name: string, loadedDocument: PDFDocumentProxy) {
+    const source: PdfSource = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      name: name.replace(/\.pdf$/i, ""),
+      document: loadedDocument,
+    };
+    setSources((current) => [...current, source]);
+    setActiveSourceId(source.id);
+    setPageNumber(1);
+  }
+
+  function handleWebFiles(files: FileList | null, target: "canvas" | "library") {
+    const pdfFiles = Array.from(files ?? []).filter(
+      (file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"),
+    );
+    setDropTarget(null);
+    if (!pdfFiles.length) {
+      setError("请拖入一个 PDF 文件。");
+      return;
+    }
+    if (target === "canvas" && sources.length > 0) {
+      setError("如需继续添加 PDF，请拖放到右侧的原始 PDF 列表。");
+      return;
+    }
+    void Promise.all(pdfFiles.map((file) => openFile(file)));
   }
 
   function changePage(next: number) {
@@ -332,18 +428,7 @@ function App() {
 
   return (
     <main
-      className="app-shell"
-      onDragOver={(event) => {
-        const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
-        if (!tauriWindow.__TAURI_INTERNALS__) event.preventDefault();
-      }}
-      onDrop={(event) => {
-        const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
-        if (!tauriWindow.__TAURI_INTERNALS__) {
-          event.preventDefault();
-          openFile(event.dataTransfer.files[0]);
-        }
-      }}
+      className={`app-shell ${leftCollapsed ? "left-collapsed" : ""}`}
     >
       <input
         ref={inputRef}
@@ -351,6 +436,14 @@ function App() {
         type="file"
         accept="application/pdf,.pdf"
         onChange={(event) => openFile(event.target.files?.[0])}
+      />
+      <input
+        ref={libraryInputRef}
+        className="file-input"
+        type="file"
+        accept="application/pdf,.pdf"
+        multiple
+        onChange={(event) => handleWebFiles(event.target.files, "library")}
       />
 
       <header className="titlebar">
@@ -403,14 +496,21 @@ function App() {
       <div className="workspace">
         <aside className="sidebar pages-panel">
           <div className="panel-heading">
-            <div className="segmented">
+            <div className="segmented collapsible-content">
               <button className="active">页面</button>
               <button>书签</button>
             </div>
-            <button className="icon-button quiet" aria-label="收起侧栏"><PanelLeftClose size={17} /></button>
+            <button
+              className="icon-button quiet panel-toggle"
+              aria-label={leftCollapsed ? "展开侧栏" : "收起侧栏"}
+              title={leftCollapsed ? "展开侧栏" : "收起侧栏"}
+              onClick={() => setLeftCollapsed((value) => !value)}
+            >
+              {leftCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+            </button>
           </div>
-          <div className="search-box"><Search size={15} /><span>搜索页面</span></div>
-          <div className="thumbnails">
+          <div className="search-box collapsible-content"><Search size={15} /><span>搜索页面</span></div>
+          <div className="thumbnails collapsible-content">
             {document ? (
               Array.from({ length: document.numPages }, (_, index) => (
                 <Thumbnail
@@ -430,7 +530,24 @@ function App() {
           </div>
         </aside>
 
-        <section className="canvas-area">
+        <section
+          className="canvas-area"
+          ref={canvasAreaRef}
+          onDragEnter={(event) => {
+            if (sources.length === 0) {
+              event.preventDefault();
+              setDropTarget("canvas");
+            }
+          }}
+          onDragOver={(event) => {
+            if (sources.length === 0) event.preventDefault();
+          }}
+          onDragLeave={() => dropTarget === "canvas" && setDropTarget(null)}
+          onDrop={(event) => {
+            event.preventDefault();
+            handleWebFiles(event.dataTransfer.files, "canvas");
+          }}
+        >
           <div className="canvas-scroll" ref={canvasScrollRef} onScroll={updateVisiblePage}>
             {loading ? (
               <div className="loading-card"><Circle className="spinner" size={28} />正在打开文档…</div>
@@ -463,43 +580,72 @@ function App() {
             </div>
           )}
           {error && <div className="error-toast">{error}</div>}
-          {isNativeDragging && (
+          {dropTarget === "canvas" && (
             <div className="native-drop-overlay">
               <FilePlus2 size={34} />
               <strong>松开以打开 PDF</strong>
-              <span>文件只会在本地处理</span>
+              <span>中央工作区用于打开第一份文档</span>
             </div>
           )}
         </section>
 
-        <aside className="sidebar properties-panel">
-          <div className="properties-header">
-            <span>属性</span>
-            <small>{tools.find((tool) => tool.id === activeTool)?.label}</small>
-          </div>
-          <section className="property-section">
-            <label>样式</label>
-            <div className="color-row">
-              <button className="color-swatch selected" style={{ background: "#99EAFA" }} />
-              <button className="color-swatch" style={{ background: "#FAA999" }} />
-              <button className="color-swatch" style={{ background: "#ef6a7a" }} />
-              <button className="color-swatch" style={{ background: "#42b59d" }} />
-              <button className="add-color"><Plus size={15} /></button>
+        <aside
+          className={`sidebar pdf-library ${dropTarget === "library" ? "is-dragging" : ""}`}
+          ref={libraryRef}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setDropTarget("library");
+          }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onDragLeave={() => dropTarget === "library" && setDropTarget(null)}
+          onDrop={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            handleWebFiles(event.dataTransfer.files, "library");
+          }}
+        >
+          <div className="library-header">
+            <div>
+              <span>原始 PDF</span>
+              <small>{sources.length} 个文件</small>
             </div>
-          </section>
-          <section className="property-section">
-            <div className="property-line"><label>不透明度</label><span>100%</span></div>
-            <input type="range" defaultValue="100" />
-          </section>
-          <section className="property-section muted-section">
-            <Sparkles size={18} />
-            <strong>专注编辑</strong>
-            <p>选择页面中的批注或对象后，可在这里调整详细属性。</p>
-          </section>
-          <div className="roadmap-note">
-            <span>ROADMAP</span>
-            <strong>原文编辑将在后续版本加入</strong>
-            <p>当前优先完成批注、签名与页面整理。</p>
+            <button className="icon-button add-pdf-button" onClick={() => libraryInputRef.current?.click()} aria-label="添加 PDF">
+              <Plus size={17} />
+            </button>
+          </div>
+          <div className="pdf-source-list">
+            {sources.map((source, index) => (
+              <button
+                key={source.id}
+                className={`pdf-source ${source.id === activeSourceId ? "active" : ""}`}
+                onClick={() => {
+                  setActiveSourceId(source.id);
+                  setPageNumber(1);
+                }}
+              >
+                <span className="pdf-source-icon"><FileText size={18} /></span>
+                <span className="pdf-source-copy">
+                  <strong>{source.name}</strong>
+                  <small>{source.document.numPages} 页 · PDF {index + 1}</small>
+                </span>
+              </button>
+            ))}
+            {!sources.length && (
+              <button className="library-empty" onClick={() => libraryInputRef.current?.click()}>
+                <FilePlus2 size={24} />
+                <strong>添加原始 PDF</strong>
+                <span>拖放到这里，可继续加入文件</span>
+              </button>
+            )}
+          </div>
+          <div className="library-drop-hint">
+            <FilePlus2 size={27} />
+            <strong>松开以添加 PDF</strong>
+            <span>新文件会加入列表</span>
           </div>
         </aside>
       </div>
