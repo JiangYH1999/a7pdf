@@ -1,4 +1,4 @@
-import { type MouseEvent as ReactMouseEvent, useEffect, useRef, useState } from "react";
+import { type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -123,6 +123,8 @@ function Thumbnail({
   sourcePageNumber,
   sequenceNumber,
   selected,
+  pageId,
+  register,
   onSelect,
   onContextMenu,
   onPointerDragStart,
@@ -134,6 +136,8 @@ function Thumbnail({
   sourcePageNumber: number;
   sequenceNumber: number;
   selected: boolean;
+  pageId: string;
+  register: (pageId: string, element: HTMLDivElement | null) => void;
   onSelect: (event: ReactMouseEvent<HTMLElement>) => void;
   onContextMenu: (position: { x: number; y: number }) => void;
   onPointerDragStart: (position: { x: number; y: number }) => void;
@@ -162,6 +166,7 @@ function Thumbnail({
   return (
     <div
       className={`thumbnail ${selected ? "selected" : ""} ${isDragging ? "dragging" : ""} ${isDropTarget ? "drop-target" : ""}`}
+      ref={(element) => register(pageId, element)}
       data-composition-index={compositionIndex}
       onPointerDown={(event) => {
         if (event.button !== 0) return;
@@ -208,11 +213,13 @@ function DragPreview({
   document,
   sourcePageNumber,
   sequenceNumber,
+  count = 1,
   position,
 }: {
   document: PDFDocumentProxy;
   sourcePageNumber: number;
   sequenceNumber: number;
+  count?: number;
   position: { x: number; y: number };
 }) {
   const [page, setPage] = useState<PDFPageProxy | null>(null);
@@ -230,9 +237,9 @@ function DragPreview({
     : 0.1;
 
   return (
-    <div className="page-drag-preview" style={{ left: position.x, top: position.y }} aria-hidden="true">
+    <div className={`page-drag-preview ${count > 1 ? "multi" : ""}`} style={{ left: position.x, top: position.y }} aria-hidden="true">
       <div className="page-drag-preview-paper"><PdfCanvas page={page} scale={scale} /></div>
-      <span>{sequenceNumber}</span>
+      <span>{count > 1 ? `${count} 页` : sequenceNumber}</span>
     </div>
   );
 }
@@ -313,6 +320,8 @@ function App() {
   const canvasAreaRef = useRef<HTMLElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
   const thumbnailsRef = useRef<HTMLDivElement>(null);
+  const thumbnailElementsRef = useRef(new Map<string, HTMLDivElement>());
+  const thumbnailPositionsRef = useRef(new Map<string, DOMRect>());
   const pageContextMenuRef = useRef<HTMLDivElement>(null);
   const libraryRef = useRef<HTMLElement>(null);
   const sourcesRef = useRef<PdfSource[]>([]);
@@ -336,6 +345,7 @@ function App() {
   const [error, setError] = useState("");
   const [dropTarget, setDropTarget] = useState<DropTarget>(null);
   const [draggedPageIndex, setDraggedPageIndex] = useState<number | null>(null);
+  const [draggedPageIds, setDraggedPageIds] = useState<Set<string>>(new Set());
   const [dropPageIndex, setDropPageIndex] = useState<number | null>(null);
   const [dragPointer, setDragPointer] = useState<{ x: number; y: number } | null>(null);
   const [selectedPageIds, setSelectedPageIds] = useState<Set<string>>(new Set());
@@ -349,6 +359,29 @@ function App() {
   useEffect(() => {
     sourcesRef.current = sources;
   }, [sources]);
+
+  useLayoutEffect(() => {
+    const previousPositions = thumbnailPositionsRef.current;
+    const nextPositions = new Map<string, DOMRect>();
+    thumbnailElementsRef.current.forEach((element, pageId) => {
+      const next = element.getBoundingClientRect();
+      const previous = previousPositions.get(pageId);
+      if (previous) {
+        const deltaY = previous.top - next.top;
+        if (Math.abs(deltaY) > 1) {
+          element.animate(
+            [
+              { transform: `translateY(${deltaY}px)`, opacity: 0.78 },
+              { transform: "translateY(0)", opacity: 1 },
+            ],
+            { duration: 360, easing: "cubic-bezier(.16, 1, .3, 1)" },
+          );
+        }
+      }
+      nextPositions.set(pageId, next);
+    });
+    thumbnailPositionsRef.current = nextPositions;
+  }, [composition]);
 
   useEffect(() => {
     if (!pageContextMenu) return;
@@ -512,6 +545,25 @@ function App() {
     setPageNumber((current) => Math.max(1, Math.min(current, next.length)));
   }
 
+  function registerThumbnail(pageId: string, element: HTMLDivElement | null) {
+    if (element) thumbnailElementsRef.current.set(pageId, element);
+    else thumbnailElementsRef.current.delete(pageId);
+  }
+
+  function beginPageDrag(index: number, position: { x: number; y: number }) {
+    const page = composition[index];
+    if (!page) return;
+    const ids = selectedPageIds.has(page.id) ? selectedPageIds : new Set([page.id]);
+    if (!selectedPageIds.has(page.id)) {
+      setSelectedPageIds(ids);
+      setSelectionAnchorIndex(index);
+      setSelectionFocusIndex(index);
+    }
+    setDragPointer(position);
+    setDraggedPageIds(ids);
+    setDraggedPageIndex(index);
+  }
+
   useEffect(() => {
     if (draggedPageIndex === null) return;
 
@@ -526,10 +578,11 @@ function App() {
       setDropPageIndex(Number.isInteger(index) ? index : null);
     };
     const finishDrag = () => {
-      if (dropPageIndex !== null && dropPageIndex !== draggedPageIndex) {
-        movePage(draggedPageIndex, dropPageIndex);
+      if (dropPageIndex !== null && !draggedPageIds.has(compositionRef.current[dropPageIndex]?.id)) {
+        movePages(draggedPageIds, dropPageIndex);
       }
       setDraggedPageIndex(null);
+      setDraggedPageIds(new Set());
       setDropPageIndex(null);
       setDragPointer(null);
     };
@@ -568,7 +621,7 @@ function App() {
       window.removeEventListener("pointercancel", finishDrag);
       if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
     };
-  }, [draggedPageIndex, dropPageIndex]);
+  }, [draggedPageIndex, draggedPageIds, dropPageIndex]);
 
   useEffect(() => {
     const element = canvasScrollRef.current;
@@ -743,14 +796,18 @@ function App() {
     });
   }
 
-  function movePage(from: number, to: number) {
-    if (from === to) return;
-    const next = [...compositionRef.current];
-    const [moved] = next.splice(from, 1);
-    const target = from < to ? to - 1 : to;
-    next.splice(target, 0, moved);
+  function movePages(pageIds: Set<string>, targetIndex: number) {
+    const current = compositionRef.current;
+    const moving = current.filter((page) => pageIds.has(page.id));
+    if (!moving.length) return;
+    const target = current[targetIndex];
+    if (!target || pageIds.has(target.id)) return;
+    const insertionIndex = current
+      .slice(0, targetIndex)
+      .filter((page) => !pageIds.has(page.id)).length;
+    const next = current.filter((page) => !pageIds.has(page.id));
+    next.splice(insertionIndex, 0, ...moving);
     commitComposition(next);
-    setPageNumber(target + 1);
   }
 
   function removeSource(sourceId: string) {
@@ -893,15 +950,14 @@ function App() {
                   sourcePageNumber={page.pageNumber}
                   sequenceNumber={index + 1}
                   selected={selectedPageIds.has(page.id)}
+                  pageId={page.id}
+                  register={registerThumbnail}
                   onSelect={(event) => selectCompositionPage(index, event)}
                   onContextMenu={(position) => openPageContextMenu(index, position)}
-                  onPointerDragStart={(position) => {
-                    setDragPointer(position);
-                    setDraggedPageIndex(index);
-                  }}
+                  onPointerDragStart={(position) => beginPageDrag(index, position)}
                   compositionIndex={index}
-                  isDragging={draggedPageIndex === index}
-                  isDropTarget={dropPageIndex === index && draggedPageIndex !== index}
+                  isDragging={draggedPageIds.has(page.id)}
+                  isDropTarget={dropPageIndex === index && !draggedPageIds.has(page.id)}
                 />
                 );
               })
@@ -1056,6 +1112,7 @@ function App() {
             document={source.document}
             sourcePageNumber={draggedPage.pageNumber}
             sequenceNumber={draggedPageIndex + 1}
+            count={draggedPageIds.size}
             position={dragPointer}
           />
         );
