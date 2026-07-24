@@ -120,7 +120,8 @@ function PdfCanvas({
 
 function Thumbnail({
   document,
-  pageNumber,
+  sourcePageNumber,
+  sequenceNumber,
   selected,
   onSelect,
   onContextMenu,
@@ -130,7 +131,8 @@ function Thumbnail({
   isDropTarget,
 }: {
   document: PDFDocumentProxy;
-  pageNumber: number;
+  sourcePageNumber: number;
+  sequenceNumber: number;
   selected: boolean;
   onSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onContextMenu: (position: { x: number; y: number }) => void;
@@ -140,6 +142,8 @@ function Thumbnail({
   isDropTarget: boolean;
 }) {
   const [page, setPage] = useState<PDFPageProxy | null>(null);
+  const pointerStartRef = useRef<{ x: number; y: number; pointerId: number } | null>(null);
+  const didDragRef = useRef(false);
   const thumbnailScale = page
     ? Math.min(
         86 / page.getViewport({ scale: 1 }).width,
@@ -149,11 +153,11 @@ function Thumbnail({
 
   useEffect(() => {
     let active = true;
-    document.getPage(pageNumber).then((loaded) => active && setPage(loaded));
+    document.getPage(sourcePageNumber).then((loaded) => active && setPage(loaded));
     return () => {
       active = false;
     };
-  }, [document, pageNumber]);
+  }, [document, sourcePageNumber]);
 
   return (
     <div
@@ -162,18 +166,38 @@ function Thumbnail({
       onPointerDown={(event) => {
         if (event.button !== 0) return;
         event.currentTarget.setPointerCapture(event.pointerId);
+        pointerStartRef.current = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+        didDragRef.current = false;
+      }}
+      onPointerMove={(event) => {
+        const start = pointerStartRef.current;
+        if (!start || start.pointerId !== event.pointerId || didDragRef.current) return;
+        if (Math.hypot(event.clientX - start.x, event.clientY - start.y) < 6) return;
+        didDragRef.current = true;
         onPointerDragStart({ x: event.clientX, y: event.clientY });
+      }}
+      onPointerUp={(event) => {
+        if (pointerStartRef.current?.pointerId === event.pointerId) pointerStartRef.current = null;
+      }}
+      onPointerCancel={() => {
+        pointerStartRef.current = null;
       }}
       onContextMenu={(event) => {
         event.preventDefault();
         onContextMenu({ x: event.clientX, y: event.clientY });
       }}
     >
-      <button className="thumbnail-select" onClick={onSelect}>
+      <button className="thumbnail-select" onClick={(event) => {
+        if (didDragRef.current) {
+          didDragRef.current = false;
+          return;
+        }
+        onSelect(event);
+      }}>
       <div className="thumbnail-paper">
         <PdfCanvas page={page} scale={thumbnailScale} />
       </div>
-      <span>{pageNumber}</span>
+      <span>{sequenceNumber}</span>
       </button>
     </div>
   );
@@ -181,22 +205,24 @@ function Thumbnail({
 
 function DragPreview({
   document,
-  pageNumber,
+  sourcePageNumber,
+  sequenceNumber,
   position,
 }: {
   document: PDFDocumentProxy;
-  pageNumber: number;
+  sourcePageNumber: number;
+  sequenceNumber: number;
   position: { x: number; y: number };
 }) {
   const [page, setPage] = useState<PDFPageProxy | null>(null);
 
   useEffect(() => {
     let active = true;
-    document.getPage(pageNumber).then((loaded) => active && setPage(loaded));
+    document.getPage(sourcePageNumber).then((loaded) => active && setPage(loaded));
     return () => {
       active = false;
     };
-  }, [document, pageNumber]);
+  }, [document, sourcePageNumber]);
 
   const scale = page
     ? Math.min(92 / page.getViewport({ scale: 1 }).width, 112 / page.getViewport({ scale: 1 }).height)
@@ -205,7 +231,7 @@ function DragPreview({
   return (
     <div className="page-drag-preview" style={{ left: position.x, top: position.y }} aria-hidden="true">
       <div className="page-drag-preview-paper"><PdfCanvas page={page} scale={scale} /></div>
-      <span>{pageNumber}</span>
+      <span>{sequenceNumber}</span>
     </div>
   );
 }
@@ -857,7 +883,8 @@ function App() {
                 <Thumbnail
                   key={page.id}
                   document={source.document}
-                  pageNumber={page.pageNumber}
+                  sourcePageNumber={page.pageNumber}
+                  sequenceNumber={index + 1}
                   selected={selectedPageIds.has(page.id)}
                   onSelect={(event) => selectCompositionPage(index, event)}
                   onContextMenu={(position) => openPageContextMenu(index, position)}
@@ -1020,7 +1047,8 @@ function App() {
         return source && (
           <DragPreview
             document={source.document}
-            pageNumber={draggedPage.pageNumber}
+            sourcePageNumber={draggedPage.pageNumber}
+            sequenceNumber={draggedPageIndex + 1}
             position={dragPointer}
           />
         );
