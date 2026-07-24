@@ -134,7 +134,7 @@ function Thumbnail({
   sourcePageNumber: number;
   sequenceNumber: number;
   selected: boolean;
-  onSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onSelect: (event: ReactMouseEvent<HTMLElement>) => void;
   onContextMenu: (position: { x: number; y: number }) => void;
   onPointerDragStart: (position: { x: number; y: number }) => void;
   compositionIndex: number;
@@ -182,23 +182,24 @@ function Thumbnail({
       onPointerCancel={() => {
         pointerStartRef.current = null;
       }}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        onContextMenu({ x: event.clientX, y: event.clientY });
-      }}
-    >
-      <button className="thumbnail-select" onClick={(event) => {
+      onClick={(event) => {
         if (didDragRef.current) {
           didDragRef.current = false;
           return;
         }
         onSelect(event);
-      }}>
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onContextMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
+      <div className="thumbnail-select">
       <div className="thumbnail-paper">
         <PdfCanvas page={page} scale={thumbnailScale} />
       </div>
       <span>{sequenceNumber}</span>
-      </button>
+      </div>
     </div>
   );
 }
@@ -452,7 +453,7 @@ function App() {
     setSelectionAnchorIndex(anchor);
   }
 
-  function selectCompositionPage(index: number, event: ReactMouseEvent<HTMLButtonElement>) {
+  function selectCompositionPage(index: number, event: ReactMouseEvent<HTMLElement>) {
     const page = composition[index];
     if (!page) return;
     if (event.shiftKey) {
