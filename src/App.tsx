@@ -355,6 +355,7 @@ function App() {
   const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 });
   const [activeTool, setActiveTool] = useState<Tool>("select");
   const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState("");
@@ -875,7 +876,7 @@ function App() {
 
   return (
     <main
-      className={`app-shell ${leftCollapsed ? "left-collapsed" : ""}`}
+      className={`app-shell ${leftCollapsed ? "left-collapsed" : ""} ${rightCollapsed ? "right-collapsed" : ""}`}
       onContextMenu={(event) => event.preventDefault()}
     >
       <input
@@ -1075,6 +1076,13 @@ function App() {
             handleWebFiles(event.dataTransfer.files, "library");
           }}
         >
+          <button
+            className="library-toggle"
+            aria-label={rightCollapsed ? "展开资源管理" : "收起资源管理"}
+            title={rightCollapsed ? "展开资源管理" : "收起资源管理"}
+            onClick={() => setRightCollapsed((value) => !value)}
+          />
+          <div className="library-content">
           <div className="library-header">
             <div>
               <span>资源管理</span>
@@ -1124,6 +1132,7 @@ function App() {
             <FilePlus2 size={27} />
             <strong>松开以添加 PDF</strong>
             <span>新文件会加入列表</span>
+          </div>
           </div>
         </aside>
       </div>
