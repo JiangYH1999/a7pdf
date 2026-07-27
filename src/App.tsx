@@ -32,6 +32,7 @@ import {
 import { PDFDocument } from "pdf-lib";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { save } from "@tauri-apps/plugin-dialog";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "./App.css";
 
@@ -863,10 +864,21 @@ function App() {
         output.addPage(copiedPage);
       }
       const bytes = await output.save();
-      const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
-      const link = Object.assign(globalThis.document.createElement("a"), { href: url, download: "A7PDF-合并文档.pdf" });
-      link.click();
-      URL.revokeObjectURL(url);
+      const suggestedName = `${fileName || "A7PDF"}-已编排.pdf`;
+      const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
+      if (tauriWindow.__TAURI_INTERNALS__) {
+        const path = await save({
+          defaultPath: suggestedName,
+          filters: [{ name: "PDF 文件", extensions: ["pdf"] }],
+        });
+        if (!path) return;
+        await invoke("save_pdf_file", { path, data: Array.from(bytes) });
+      } else {
+        const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+        const link = Object.assign(globalThis.document.createElement("a"), { href: url, download: suggestedName });
+        link.click();
+        URL.revokeObjectURL(url);
+      }
     } catch {
       setError("导出失败，请检查导入的 PDF 是否受密码保护。");
     } finally {

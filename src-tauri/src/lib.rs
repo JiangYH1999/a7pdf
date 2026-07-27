@@ -12,11 +12,26 @@ fn read_pdf_file(path: String) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn save_pdf_file(path: String, data: Vec<u8>) -> Result<(), String> {
+    let is_pdf = std::path::Path::new(&path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
+
+    if !is_pdf {
+        return Err("The exported file must use a .pdf extension.".into());
+    }
+
+    std::fs::write(path, data).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![read_pdf_file])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![read_pdf_file, save_pdf_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
