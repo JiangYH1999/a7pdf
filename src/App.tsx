@@ -52,6 +52,8 @@ type ComposedPage = {
   pageNumber: number;
 };
 
+const READING_SCALE = 1.5;
+
 const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "select", label: "选择", icon: MousePointer2 },
   { id: "text", label: "文本框", icon: Type },
@@ -299,7 +301,7 @@ function ContinuousPage({
       data-page-number={sequenceNumber}
       ref={(element) => register(sequenceNumber, element)}
     >
-      <PdfCanvas page={page} scale={fitScale * (zoom / 100)} className="main-pdf-page" />
+      <PdfCanvas page={page} scale={fitScale * READING_SCALE * (zoom / 100)} className="main-pdf-page" />
       <span className="page-label">{sequenceNumber}</span>
     </div>
   );
