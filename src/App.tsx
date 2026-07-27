@@ -29,7 +29,7 @@ import {
   type PDFDocumentProxy,
   type PDFPageProxy,
 } from "pdfjs-dist";
-import { PDFDocument } from "pdf-lib";
+import { degrees, PDFDocument } from "pdf-lib";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -50,6 +50,7 @@ type ComposedPage = {
   id: string;
   sourceId: string;
   pageNumber: number;
+  rotation: number;
 };
 
 const READING_SCALE = 4;
@@ -85,10 +86,12 @@ function positionHits(
 function PdfCanvas({
   page,
   scale,
+  rotation = 0,
   className = "",
 }: {
   page: PDFPageProxy | null;
   scale: number;
+  rotation?: number;
   className?: string;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -96,7 +99,7 @@ function PdfCanvas({
   useEffect(() => {
     if (!page || !canvasRef.current) return;
     const canvas = canvasRef.current;
-    const viewport = page.getViewport({ scale });
+    const viewport = page.getViewport({ scale, rotation });
     const outputScale = Math.min(window.devicePixelRatio || 1, 2);
     const context = canvas.getContext("2d");
     if (!context) return;
@@ -116,7 +119,7 @@ function PdfCanvas({
     return () => {
       renderTask.cancel();
     };
-  }, [page, scale]);
+  }, [page, rotation, scale]);
 
   return <canvas ref={canvasRef} className={className} />;
 }
@@ -125,6 +128,7 @@ function Thumbnail({
   document,
   sourcePageNumber,
   sequenceNumber,
+  rotation,
   selected,
   pageId,
   register,
@@ -138,6 +142,7 @@ function Thumbnail({
   document: PDFDocumentProxy;
   sourcePageNumber: number;
   sequenceNumber: number;
+  rotation: number;
   selected: boolean;
   pageId: string;
   register: (pageId: string, element: HTMLDivElement | null) => void;
@@ -153,8 +158,8 @@ function Thumbnail({
   const didDragRef = useRef(false);
   const thumbnailScale = page
     ? Math.min(
-        86 / page.getViewport({ scale: 1 }).width,
-        82 / page.getViewport({ scale: 1 }).height,
+        86 / page.getViewport({ scale: 1, rotation }).width,
+        82 / page.getViewport({ scale: 1, rotation }).height,
       )
     : 0.1;
 
@@ -204,7 +209,7 @@ function Thumbnail({
     >
       <div className="thumbnail-select">
       <div className="thumbnail-paper">
-        <PdfCanvas page={page} scale={thumbnailScale} />
+        <PdfCanvas page={page} scale={thumbnailScale} rotation={rotation} />
       </div>
       <span>{sequenceNumber}</span>
       </div>
@@ -216,12 +221,14 @@ function DragPreview({
   document,
   sourcePageNumber,
   sequenceNumber,
+  rotation,
   count = 1,
   position,
 }: {
   document: PDFDocumentProxy;
   sourcePageNumber: number;
   sequenceNumber: number;
+  rotation: number;
   count?: number;
   position: { x: number; y: number };
 }) {
@@ -236,7 +243,7 @@ function DragPreview({
   }, [document, sourcePageNumber]);
 
   const scale = page
-    ? Math.min(92 / page.getViewport({ scale: 1 }).width, 112 / page.getViewport({ scale: 1 }).height)
+    ? Math.min(92 / page.getViewport({ scale: 1, rotation }).width, 112 / page.getViewport({ scale: 1, rotation }).height)
     : 0.1;
   const stackDepth = Math.min(count - 1, 4);
 
@@ -255,7 +262,7 @@ function DragPreview({
           ))}
         </div>
       )}
-      <div className="page-drag-preview-paper"><PdfCanvas page={page} scale={scale} /></div>
+      <div className="page-drag-preview-paper"><PdfCanvas page={page} scale={scale} rotation={rotation} /></div>
       {count > 1 && <b className="page-drag-current">第{sequenceNumber}页</b>}
       <span>{count > 1 ? `共${count}页` : sequenceNumber}</span>
     </div>
@@ -266,6 +273,7 @@ function ContinuousPage({
   document,
   pageNumber,
   sequenceNumber,
+  rotation,
   canvasSize,
   zoom,
   register,
@@ -273,6 +281,7 @@ function ContinuousPage({
   document: PDFDocumentProxy;
   pageNumber: number;
   sequenceNumber: number;
+  rotation: number;
   canvasSize: { width: number; height: number };
   zoom: number;
   register: (pageNumber: number, element: HTMLDivElement | null) => void;
@@ -287,7 +296,7 @@ function ContinuousPage({
     };
   }, [document, pageNumber]);
 
-  const viewport = page?.getViewport({ scale: 1 });
+  const viewport = page?.getViewport({ scale: 1, rotation });
   const fitScale = viewport
     ? Math.min(
         Math.max(canvasSize.width - 120, 240) / viewport.width,
@@ -301,7 +310,7 @@ function ContinuousPage({
       data-page-number={sequenceNumber}
       ref={(element) => register(sequenceNumber, element)}
     >
-      <PdfCanvas page={page} scale={fitScale * READING_SCALE * (zoom / 100)} className="main-pdf-page" />
+      <PdfCanvas page={page} scale={fitScale * READING_SCALE * (zoom / 100)} rotation={rotation} className="main-pdf-page" />
     </div>
   );
 }
@@ -763,6 +772,7 @@ function App() {
         id: `${source.id}-${index + 1}`,
         sourceId: source.id,
         pageNumber: index + 1,
+        rotation: 0,
       })),
     ]);
     setActiveSourceId(source.id);
@@ -833,6 +843,16 @@ function App() {
     commitComposition(next);
   }
 
+  function rotateSelectedPages() {
+    const pageIds = selectedPageIds.size
+      ? selectedPageIds
+      : new Set(composition[pageNumber - 1] ? [composition[pageNumber - 1].id] : []);
+    if (!pageIds.size) return;
+    commitComposition(compositionRef.current.map((page) => (
+      pageIds.has(page.id) ? { ...page, rotation: ((page.rotation ?? 0) + 90) % 360 } : page
+    )));
+  }
+
   function removeSource(sourceId: string) {
     const remaining = sources.filter((source) => source.id !== sourceId);
     setSources(remaining);
@@ -900,7 +920,11 @@ function App() {
         for (let offset = 0; offset < pages.length; offset += batchSize) {
           const batch = pages.slice(offset, offset + batchSize);
           const copiedBatch = await output.copyPages(source, batch.map((page) => page.pageNumber - 1));
-          batch.forEach((page, index) => copiedPages.set(page.id, copiedBatch[index]));
+          batch.forEach((page, index) => {
+            const copiedPage = copiedBatch[index];
+            copiedPage.setRotation(degrees((copiedPage.getRotation().angle + page.rotation) % 360));
+            copiedPages.set(page.id, copiedPage);
+          });
           copiedCount += batch.length;
           setExportProgress({
             value: 20 + Math.round((copiedCount / composition.length) * 70),
@@ -992,7 +1016,7 @@ function App() {
           ))}
         </div>
         <div className="toolbar-divider" />
-        <button className="tool-button" title="旋转页面"><RotateCw size={19} /><span>旋转</span></button>
+        <button className="tool-button" title="顺时针旋转 90°" disabled={!composition.length} onClick={rotateSelectedPages}><RotateCw size={19} /><span>旋转</span></button>
         <div className="toolbar-spacer" />
         {composition.length > 0 && (
           <div className="toolbar-page-navigation">
@@ -1042,6 +1066,7 @@ function App() {
                   document={source.document}
                   sourcePageNumber={page.pageNumber}
                   sequenceNumber={index + 1}
+                  rotation={page.rotation}
                   selected={selectedPageIds.has(page.id)}
                   pageId={page.id}
                   register={registerThumbnail}
@@ -1094,6 +1119,7 @@ function App() {
                       document={source.document}
                       pageNumber={page.pageNumber}
                       sequenceNumber={index + 1}
+                      rotation={page.rotation}
                       canvasSize={canvasSize}
                       zoom={zoom}
                       register={registerPage}
@@ -1202,6 +1228,7 @@ function App() {
             document={source.document}
             sourcePageNumber={draggedPage.pageNumber}
             sequenceNumber={draggedPageIndex + 1}
+            rotation={draggedPage.rotation}
             count={draggedPageIds.size}
             position={dragPointer}
           />
