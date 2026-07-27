@@ -318,9 +318,6 @@ function EmptyDocument({ onOpen }: { onOpen: () => void }) {
         </div>
         <div className="sparkle"><Sparkles size={21} /></div>
       </div>
-      <p className="empty-copy">
-        在本地打开 PDF，完成批注、签名与页面整理。文件不会离开你的设备。
-      </p>
       <button className="primary-button" onClick={onOpen}>
         <FilePlus2 size={18} />
         打开 PDF
