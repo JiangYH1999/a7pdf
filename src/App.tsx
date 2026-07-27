@@ -52,7 +52,7 @@ type ComposedPage = {
   pageNumber: number;
 };
 
-const READING_SCALE = 1.5;
+const READING_SCALE = 2.4;
 
 const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "select", label: "选择", icon: MousePointer2 },
