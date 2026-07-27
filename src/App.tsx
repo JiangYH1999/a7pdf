@@ -970,9 +970,9 @@ function App() {
         <div className="title-actions">
           <button className="icon-button" aria-label="撤销" title="撤销（⌘/Ctrl Z）" disabled={historyIndex === 0} onClick={undoComposition}><Undo2 size={18} /></button>
           <button className="icon-button" aria-label="重做" title="重做（⌘/Ctrl Shift Z）" disabled={historyIndex >= historyLength - 1} onClick={redoComposition}><Redo2 size={18} /></button>
-          <button className="export-button" disabled={!composition.length || exporting} onClick={exportComposition}>
-            <Download size={17} />
-            {exporting ? "正在导出" : "导出"}
+          <button className={`export-button ${exporting ? "is-exporting" : ""}`} disabled={!composition.length || exporting} onClick={exportComposition} title={exporting ? exportProgress.stage : "导出当前编排"}>
+            {exporting && <i className="export-button-progress" style={{ width: `${exportProgress.value}%` }} />}
+            <span className="export-button-content"><Download size={17} />{exporting ? `正在导出 ${exportProgress.value}%` : "导出"}</span>
           </button>
         </div>
       </header>
@@ -994,7 +994,7 @@ function App() {
         <div className="toolbar-divider" />
         <button className="tool-button" title="旋转页面"><RotateCw size={19} /><span>旋转</span></button>
         <div className="toolbar-spacer" />
-        {composition.length > 0 && !exporting && (
+        {composition.length > 0 && (
           <div className="toolbar-page-navigation">
             <button onClick={() => changePage(pageNumber - 1)} disabled={pageNumber === 1} aria-label="上一页">
               <ChevronLeft size={16} />
@@ -1003,15 +1003,6 @@ function App() {
             <button onClick={() => changePage(pageNumber + 1)} disabled={pageNumber === composition.length} aria-label="下一页">
               <ChevronRight size={16} />
             </button>
-          </div>
-        )}
-        {exporting && (
-          <div className="export-progress" role="status" aria-live="polite">
-            <div className="export-progress-copy">
-              <strong>{exportProgress.stage}</strong>
-              <span>{exportProgress.value}%</span>
-            </div>
-            <div className="export-progress-track"><i style={{ width: `${exportProgress.value}%` }} /></div>
           </div>
         )}
         <div className="zoom-control">
