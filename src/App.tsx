@@ -356,6 +356,7 @@ function App() {
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState({ value: 0, stage: "" });
   const [error, setError] = useState("");
   const [dropTarget, setDropTarget] = useState<DropTarget>(null);
   const [draggedPageIndex, setDraggedPageIndex] = useState<number | null>(null);
@@ -848,21 +849,59 @@ function App() {
   async function exportComposition() {
     if (!composition.length) return;
     setExporting(true);
+    setExportProgress({ value: 3, stage: "正在准备导出" });
     setError("");
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     try {
       const output = await PDFDocument.create();
-      const sourceDocuments = new Map<string, PDFDocument>();
-      for (const source of sources) sourceDocuments.set(source.id, await PDFDocument.load(source.data));
+      const pagesBySource = new Map<string, ComposedPage[]>();
       for (const page of composition) {
-        const source = sourceDocuments.get(page.sourceId);
-        if (!source) continue;
-        const [copiedPage] = await output.copyPages(source, [page.pageNumber - 1]);
-        output.addPage(copiedPage);
+        const pages = pagesBySource.get(page.sourceId) ?? [];
+        pages.push(page);
+        pagesBySource.set(page.sourceId, pages);
       }
-      const bytes = await output.save();
+      const sourceDocuments = new Map<string, PDFDocument>();
+      const exportSources = sources.filter((source) => pagesBySource.has(source.id));
+      let loadedSources = 0;
+      setExportProgress({ value: 6, stage: `正在读取 ${exportSources.length} 个文件` });
+      await Promise.all(exportSources.map(async (source) => {
+        const sourceDocument = await PDFDocument.load(source.data);
+        sourceDocuments.set(source.id, sourceDocument);
+        loadedSources += 1;
+        setExportProgress({
+          value: 8 + Math.round((loadedSources / exportSources.length) * 12),
+          stage: `正在读取文件 ${loadedSources}/${exportSources.length}`,
+        });
+      }));
+
+      const copiedPages = new Map<string, Awaited<ReturnType<PDFDocument["copyPages"]>>[number]>();
+      let copiedCount = 0;
+      const batchSize = 12;
+      for (const [sourceId, pages] of pagesBySource) {
+        const source = sourceDocuments.get(sourceId);
+        if (!source) continue;
+        for (let offset = 0; offset < pages.length; offset += batchSize) {
+          const batch = pages.slice(offset, offset + batchSize);
+          const copiedBatch = await output.copyPages(source, batch.map((page) => page.pageNumber - 1));
+          batch.forEach((page, index) => copiedPages.set(page.id, copiedBatch[index]));
+          copiedCount += batch.length;
+          setExportProgress({
+            value: 20 + Math.round((copiedCount / composition.length) * 70),
+            stage: `正在重新编排页面 ${copiedCount}/${composition.length}`,
+          });
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        }
+      }
+      for (const page of composition) {
+        const copiedPage = copiedPages.get(page.id);
+        if (copiedPage) output.addPage(copiedPage);
+      }
+      setExportProgress({ value: 92, stage: "正在生成 PDF 文件" });
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const bytes = await output.save({ useObjectStreams: true, objectsPerTick: 500 });
       const suggestedName = `${fileName || "A7PDF"}-已编排.pdf`;
       const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
+      setExportProgress({ value: 98, stage: "正在保存文件" });
       if (tauriWindow.__TAURI_INTERNALS__) {
         const path = await save({
           defaultPath: suggestedName,
@@ -876,6 +915,7 @@ function App() {
         link.click();
         URL.revokeObjectURL(url);
       }
+      setExportProgress({ value: 100, stage: "导出完成" });
     } catch {
       setError("导出失败，请检查导入的 PDF 是否受密码保护。");
     } finally {
@@ -954,6 +994,15 @@ function App() {
         <div className="import-progress" role="status" aria-live="polite">
           <span />
           <strong>正在读取 PDF 文件…</strong>
+        </div>
+      )}
+      {exporting && (
+        <div className="export-progress" role="status" aria-live="polite">
+          <div className="export-progress-copy">
+            <strong>{exportProgress.stage}</strong>
+            <span>{exportProgress.value}%</span>
+          </div>
+          <div className="export-progress-track"><i style={{ width: `${exportProgress.value}%` }} /></div>
         </div>
       )}
 
