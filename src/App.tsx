@@ -336,6 +336,7 @@ function EmptyDocument({ onOpen }: { onOpen: () => void }) {
 function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const libraryInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const canvasAreaRef = useRef<HTMLElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
   const thumbnailsRef = useRef<HTMLDivElement>(null);
@@ -735,6 +736,37 @@ function App() {
     }
   }
 
+  async function openImageFile(file?: File) {
+    if (!file) return;
+    const isPng = file.type === "image/png" || file.name.toLowerCase().endsWith(".png");
+    const isJpeg = file.type === "image/jpeg" || file.name.toLowerCase().match(/\.jpe?g$/);
+    if (!isPng && !isJpeg) {
+      setError("请选择 JPG 或 PNG 图片。");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    try {
+      const imageData = new Uint8Array(await file.arrayBuffer());
+      const imagePdf = await PDFDocument.create();
+      const embeddedImage = isPng
+        ? await imagePdf.embedPng(imageData)
+        : await imagePdf.embedJpg(imageData);
+      const scale = Math.min(0.75, 1440 / Math.max(embeddedImage.width, embeddedImage.height));
+      const { width, height } = embeddedImage.scale(scale);
+      const imagePage = imagePdf.addPage([width, height]);
+      imagePage.drawImage(embeddedImage, { x: 0, y: 0, width, height });
+      const pdfData = await imagePdf.save();
+      const loadedDocument = await getDocument({ data: pdfData.slice() }).promise;
+      addSource(file.name, loadedDocument, pdfData, pageNumber - 1);
+    } catch {
+      setError("无法导入这张图片，请检查文件是否损坏。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function openNativePaths(paths: string[]) {
     setLoading(true);
     setError("");
@@ -754,25 +786,30 @@ function App() {
     }
   }
 
-  function addSource(name: string, loadedDocument: PDFDocumentProxy, data: Uint8Array) {
+  function addSource(name: string, loadedDocument: PDFDocumentProxy, data: Uint8Array, insertAfter?: number) {
     const source: PdfSource = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      name: name.replace(/\.pdf$/i, ""),
+      name: name.replace(/\.[^.]+$/, ""),
       document: loadedDocument,
       data,
     };
     setSources((current) => [...current, source]);
-    commitComposition([
-      ...compositionRef.current,
-      ...Array.from({ length: loadedDocument.numPages }, (_, index) => ({
+    const newPages = Array.from({ length: loadedDocument.numPages }, (_, index) => ({
         id: `${source.id}-${index + 1}`,
         sourceId: source.id,
         pageNumber: index + 1,
         rotation: 0,
-      })),
+      }));
+    const insertionIndex = insertAfter === undefined
+      ? compositionRef.current.length
+      : Math.max(0, Math.min(insertAfter + 1, compositionRef.current.length));
+    commitComposition([
+      ...compositionRef.current.slice(0, insertionIndex),
+      ...newPages,
+      ...compositionRef.current.slice(insertionIndex),
     ]);
     setActiveSourceId(source.id);
-    setPageNumber(1);
+    setPageNumber(insertAfter === undefined ? 1 : insertionIndex + 1);
   }
 
   function handleWebFiles(files: FileList | null, target: "canvas" | "library") {
@@ -973,6 +1010,16 @@ function App() {
         multiple
         onChange={(event) => handleWebFiles(event.target.files, "library")}
       />
+      <input
+        ref={imageInputRef}
+        className="file-input"
+        type="file"
+        accept="image/png,image/jpeg,.png,.jpg,.jpeg"
+        onChange={(event) => {
+          void openImageFile(event.target.files?.[0]);
+          event.currentTarget.value = "";
+        }}
+      />
 
       <header className="titlebar">
         <div className="brand">
@@ -1003,7 +1050,10 @@ function App() {
             <button
               key={id}
               className={`tool-button ${activeTool === id ? "active" : ""}`}
-              onClick={() => setActiveTool(id)}
+              onClick={() => {
+                setActiveTool(id);
+                if (id === "image") imageInputRef.current?.click();
+              }}
               title={label}
             >
               <Icon size={19} strokeWidth={1.8} />
