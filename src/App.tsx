@@ -876,6 +876,7 @@ function App() {
   return (
     <main
       className={`app-shell ${leftCollapsed ? "left-collapsed" : ""}`}
+      onContextMenu={(event) => event.preventDefault()}
     >
       <input
         ref={inputRef}
