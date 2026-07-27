@@ -52,7 +52,7 @@ type ComposedPage = {
   pageNumber: number;
 };
 
-const READING_SCALE = 2.4;
+const READING_SCALE = 4;
 
 const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "select", label: "选择", icon: MousePointer2 },
@@ -302,7 +302,6 @@ function ContinuousPage({
       ref={(element) => register(sequenceNumber, element)}
     >
       <PdfCanvas page={page} scale={fitScale * READING_SCALE * (zoom / 100)} className="main-pdf-page" />
-      <span className="page-label">{sequenceNumber}</span>
     </div>
   );
 }
@@ -995,6 +994,17 @@ function App() {
         <div className="toolbar-divider" />
         <button className="tool-button" title="旋转页面"><RotateCw size={19} /><span>旋转</span></button>
         <div className="toolbar-spacer" />
+        {composition.length > 0 && (
+          <div className="toolbar-page-navigation">
+            <button onClick={() => changePage(pageNumber - 1)} disabled={pageNumber === 1} aria-label="上一页">
+              <ChevronLeft size={16} />
+            </button>
+            <span><strong>{pageNumber}</strong> / {composition.length}</span>
+            <button onClick={() => changePage(pageNumber + 1)} disabled={pageNumber === composition.length} aria-label="下一页">
+              <ChevronRight size={16} />
+            </button>
+          </div>
+        )}
         {exporting && (
           <div className="export-progress" role="status" aria-live="polite">
             <div className="export-progress-copy">
@@ -1104,17 +1114,6 @@ function App() {
               <EmptyDocument onOpen={() => inputRef.current?.click()} />
             )}
           </div>
-          {composition.length > 0 && (
-            <div className="page-navigation">
-              <button onClick={() => changePage(pageNumber - 1)} disabled={pageNumber === 1}>
-                <ChevronLeft size={16} />
-              </button>
-              <span><strong>{pageNumber}</strong> / {composition.length}</span>
-              <button onClick={() => changePage(pageNumber + 1)} disabled={pageNumber === composition.length}>
-                <ChevronRight size={16} />
-              </button>
-            </div>
-          )}
           {error && <div className="error-toast">{error}</div>}
           {dropTarget === "canvas" && (
             <div className="native-drop-overlay">
