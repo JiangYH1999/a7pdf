@@ -848,6 +848,22 @@ function App() {
 
   async function exportComposition() {
     if (!composition.length) return;
+    const suggestedName = `${fileName || "A7PDF"}-已编排.pdf`;
+    const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
+    let outputPath: string | null = null;
+    try {
+      if (tauriWindow.__TAURI_INTERNALS__) {
+        outputPath = await save({
+          defaultPath: suggestedName,
+          filters: [{ name: "PDF 文件", extensions: ["pdf"] }],
+        });
+        if (!outputPath) return;
+      }
+    } catch {
+      setError("无法打开保存位置，请稍后重试。");
+      return;
+    }
+
     setExporting(true);
     setExportProgress({ value: 3, stage: "正在准备导出" });
     setError("");
@@ -899,16 +915,9 @@ function App() {
       setExportProgress({ value: 92, stage: "正在生成 PDF 文件" });
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       const bytes = await output.save({ useObjectStreams: true, objectsPerTick: 500 });
-      const suggestedName = `${fileName || "A7PDF"}-已编排.pdf`;
-      const tauriWindow = window as Window & { __TAURI_INTERNALS__?: unknown };
       setExportProgress({ value: 98, stage: "正在保存文件" });
-      if (tauriWindow.__TAURI_INTERNALS__) {
-        const path = await save({
-          defaultPath: suggestedName,
-          filters: [{ name: "PDF 文件", extensions: ["pdf"] }],
-        });
-        if (!path) return;
-        await invoke("save_pdf_file", { path, data: Array.from(bytes) });
+      if (outputPath) {
+        await invoke("save_pdf_file", { path: outputPath, data: Array.from(bytes) });
       } else {
         const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
         const link = Object.assign(globalThis.document.createElement("a"), { href: url, download: suggestedName });
@@ -984,6 +993,15 @@ function App() {
         <div className="toolbar-divider" />
         <button className="tool-button" title="旋转页面"><RotateCw size={19} /><span>旋转</span></button>
         <div className="toolbar-spacer" />
+        {exporting && (
+          <div className="export-progress" role="status" aria-live="polite">
+            <div className="export-progress-copy">
+              <strong>{exportProgress.stage}</strong>
+              <span>{exportProgress.value}%</span>
+            </div>
+            <div className="export-progress-track"><i style={{ width: `${exportProgress.value}%` }} /></div>
+          </div>
+        )}
         <div className="zoom-control">
           <button onClick={() => setZoom((value) => Math.max(10, value - 10))} title="缩小（⌘/Ctrl -）"><Minus size={16} /></button>
           <span>{zoom}%</span>
@@ -996,16 +1014,6 @@ function App() {
           <strong>正在读取 PDF 文件…</strong>
         </div>
       )}
-      {exporting && (
-        <div className="export-progress" role="status" aria-live="polite">
-          <div className="export-progress-copy">
-            <strong>{exportProgress.stage}</strong>
-            <span>{exportProgress.value}%</span>
-          </div>
-          <div className="export-progress-track"><i style={{ width: `${exportProgress.value}%` }} /></div>
-        </div>
-      )}
-
       <div className="workspace">
         <aside className="sidebar pages-panel">
           <div className="panel-heading">
