@@ -994,7 +994,7 @@ function App() {
         <div className="toolbar-divider" />
         <button className="tool-button" title="旋转页面"><RotateCw size={19} /><span>旋转</span></button>
         <div className="toolbar-spacer" />
-        {composition.length > 0 && (
+        {composition.length > 0 && !exporting && (
           <div className="toolbar-page-navigation">
             <button onClick={() => changePage(pageNumber - 1)} disabled={pageNumber === 1} aria-label="上一页">
               <ChevronLeft size={16} />
