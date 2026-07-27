@@ -16,8 +16,6 @@ import {
   Plus,
   Redo2,
   RotateCw,
-  Shapes,
-  Signature,
   Sparkles,
   Trash2,
   Type,
@@ -38,7 +36,7 @@ import "./App.css";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "draw" | "shape" | "image" | "sign" | "comment";
+type Tool = "select" | "text" | "highlight" | "draw" | "image" | "comment";
 type DropTarget = "canvas" | "library" | null;
 type PdfSource = {
   id: string;
@@ -60,9 +58,7 @@ const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "text", label: "文本框", icon: Type },
   { id: "highlight", label: "高亮", icon: Highlighter },
   { id: "draw", label: "画笔", icon: PenLine },
-  { id: "shape", label: "形状", icon: Shapes },
   { id: "image", label: "图片", icon: ImagePlus },
-  { id: "sign", label: "签名", icon: Signature },
   { id: "comment", label: "批注", icon: MessageSquareText },
 ];
 
