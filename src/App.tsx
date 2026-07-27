@@ -246,7 +246,7 @@ function DragPreview({
         </div>
       )}
       <div className="page-drag-preview-paper"><PdfCanvas page={page} scale={scale} /></div>
-      {count > 1 && <b className="page-drag-count">{count}</b>}
+      {count > 1 && <b className="page-drag-current">第{sequenceNumber}页</b>}
       <span>{count > 1 ? `共${count}页` : sequenceNumber}</span>
     </div>
   );
