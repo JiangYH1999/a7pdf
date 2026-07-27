@@ -241,7 +241,7 @@ function DragPreview({
       {count > 1 && (
         <div className="page-drag-preview-stack">
           {Array.from({ length: Math.min(count - 1, 4) }, (_, index) => (
-            <i key={index} style={{ transform: `translate(${(index + 1) * 5}px, ${(index + 1) * 6}px)` }} />
+            <i key={index} style={{ transform: `translate(-${(index + 1) * 5}px, -${(index + 1) * 6}px)` }} />
           ))}
         </div>
       )}
