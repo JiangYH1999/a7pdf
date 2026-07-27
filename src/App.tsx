@@ -235,13 +235,20 @@ function DragPreview({
   const scale = page
     ? Math.min(92 / page.getViewport({ scale: 1 }).width, 112 / page.getViewport({ scale: 1 }).height)
     : 0.1;
+  const stackDepth = Math.min(count - 1, 4);
 
   return (
     <div className={`page-drag-preview ${count > 1 ? "multi" : ""}`} style={{ left: position.x, top: position.y }} aria-hidden="true">
       {count > 1 && (
         <div className="page-drag-preview-stack">
-          {Array.from({ length: Math.min(count - 1, 4) }, (_, index) => (
-            <i key={index} style={{ transform: `translate(-${(index + 1) * 5}px, -${(index + 1) * 6}px)` }} />
+          {Array.from({ length: stackDepth }, (_, index) => (
+            <i
+              key={index}
+              style={{
+                transform: `translate(-${(index + 1) * 5}px, -${(index + 1) * 6}px)`,
+                zIndex: stackDepth - index,
+              }}
+            />
           ))}
         </div>
       )}
