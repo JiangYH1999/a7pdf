@@ -1,5 +1,9 @@
 import { type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
   ChevronLeft,
   ChevronRight,
   Circle,
@@ -16,6 +20,7 @@ import {
   Plus,
   Redo2,
   RotateCw,
+  RotateCcw,
   Sparkles,
   Trash2,
   Type,
@@ -43,6 +48,16 @@ type PdfSource = {
   name: string;
   document: PDFDocumentProxy;
   data: Uint8Array;
+  image?: ImageSource;
+};
+type ImageLayout = { x: number; y: number; width: number; height: number };
+type ImageSource = {
+  data: Uint8Array;
+  format: "png" | "jpeg";
+  pageWidth: number;
+  pageHeight: number;
+  original: ImageLayout;
+  layout: ImageLayout;
 };
 type ComposedPage = {
   id: string;
@@ -52,6 +67,16 @@ type ComposedPage = {
 };
 
 const READING_SCALE = 4;
+
+async function buildImagePdf(image: ImageSource) {
+  const pdf = await PDFDocument.create();
+  const embedded = image.format === "png"
+    ? await pdf.embedPng(image.data)
+    : await pdf.embedJpg(image.data);
+  const page = pdf.addPage([image.pageWidth, image.pageHeight]);
+  page.drawImage(embedded, image.layout);
+  return pdf.save();
+}
 
 const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "select", label: "选择", icon: MousePointer2 },
@@ -362,6 +387,7 @@ function App() {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [imageAdjusting, setImageAdjusting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState({ value: 0, stage: "" });
   const [error, setError] = useState("");
@@ -377,6 +403,10 @@ function App() {
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
   const document = activeSource?.document ?? null;
   const fileName = activeSource?.name ?? "未命名文档";
+  const currentComposedPage = composition[pageNumber - 1];
+  const currentImageSource = currentComposedPage
+    ? sources.find((source) => source.id === currentComposedPage.sourceId && source.image)?.image
+    : undefined;
 
   useEffect(() => {
     sourcesRef.current = sources;
@@ -755,11 +785,18 @@ function App() {
         : await imagePdf.embedJpg(imageData);
       const scale = Math.min(0.75, 1440 / Math.max(embeddedImage.width, embeddedImage.height));
       const { width, height } = embeddedImage.scale(scale);
-      const imagePage = imagePdf.addPage([width, height]);
-      imagePage.drawImage(embeddedImage, { x: 0, y: 0, width, height });
-      const pdfData = await imagePdf.save();
+      const initialLayout = { x: 0, y: 0, width, height };
+      const imageSource: ImageSource = {
+        data: imageData,
+        format: isPng ? "png" : "jpeg",
+        pageWidth: width,
+        pageHeight: height,
+        original: initialLayout,
+        layout: initialLayout,
+      };
+      const pdfData = await buildImagePdf(imageSource);
       const loadedDocument = await getDocument({ data: pdfData.slice() }).promise;
-      addSource(file.name, loadedDocument, pdfData, pageNumber - 1);
+      addSource(file.name, loadedDocument, pdfData, pageNumber - 1, imageSource);
     } catch {
       setError("无法导入这张图片，请检查文件是否损坏。");
     } finally {
@@ -786,12 +823,19 @@ function App() {
     }
   }
 
-  function addSource(name: string, loadedDocument: PDFDocumentProxy, data: Uint8Array, insertAfter?: number) {
+  function addSource(
+    name: string,
+    loadedDocument: PDFDocumentProxy,
+    data: Uint8Array,
+    insertAfter?: number,
+    image?: ImageSource,
+  ) {
     const source: PdfSource = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       name: name.replace(/\.[^.]+$/, ""),
       document: loadedDocument,
       data,
+      image,
     };
     setSources((current) => [...current, source]);
     const newPages = Array.from({ length: loadedDocument.numPages }, (_, index) => ({
@@ -884,6 +928,52 @@ function App() {
     commitComposition(compositionRef.current.map((page) => (
       pageIds.has(page.id) ? { ...page, rotation: ((page.rotation ?? 0) + 90) % 360 } : page
     )));
+  }
+
+  async function adjustCurrentImage(action: "smaller" | "larger" | "left" | "right" | "up" | "down" | "reset") {
+    if (!currentComposedPage || !currentImageSource || imageAdjusting) return;
+    const sourceId = currentComposedPage.sourceId;
+    const { pageWidth, pageHeight, layout, original } = currentImageSource;
+    let nextLayout = { ...layout };
+    const ratio = layout.width / layout.height;
+    if (action === "reset") {
+      nextLayout = { ...original };
+    } else if (action === "smaller" || action === "larger") {
+      const factor = action === "smaller" ? 0.9 : 1.1;
+      const maxWidth = pageWidth;
+      const width = Math.max(pageWidth * 0.12, Math.min(maxWidth, layout.width * factor));
+      const height = width / ratio;
+      nextLayout = {
+        width,
+        height,
+        x: Math.max(0, Math.min(pageWidth - width, layout.x - (width - layout.width) / 2)),
+        y: Math.max(0, Math.min(pageHeight - height, layout.y - (height - layout.height) / 2)),
+      };
+    } else {
+      const stepX = pageWidth * 0.06;
+      const stepY = pageHeight * 0.06;
+      const x = action === "left" ? layout.x - stepX : action === "right" ? layout.x + stepX : layout.x;
+      const y = action === "down" ? layout.y - stepY : action === "up" ? layout.y + stepY : layout.y;
+      nextLayout = {
+        ...layout,
+        x: Math.max(0, Math.min(pageWidth - layout.width, x)),
+        y: Math.max(0, Math.min(pageHeight - layout.height, y)),
+      };
+    }
+
+    setImageAdjusting(true);
+    try {
+      const nextImage = { ...currentImageSource, layout: nextLayout };
+      const data = await buildImagePdf(nextImage);
+      const document = await getDocument({ data: data.slice() }).promise;
+      setSources((current) => current.map((source) => (
+        source.id === sourceId ? { ...source, data, document, image: nextImage } : source
+      )));
+    } catch {
+      setError("无法调整图片，请稍后重试。");
+    } finally {
+      setImageAdjusting(false);
+    }
   }
 
   function removeSource(sourceId: string) {
@@ -1063,6 +1153,20 @@ function App() {
         </div>
         <div className="toolbar-divider" />
         <button className="tool-button" title="顺时针旋转 90°" disabled={!composition.length} onClick={rotateSelectedPages}><RotateCw size={19} /><span>旋转</span></button>
+        {currentImageSource && (
+          <div className="image-adjustments" aria-label="图片调整">
+            <span>图片调整</span>
+            <div className="image-adjustment-buttons">
+              <button title="缩小图片" disabled={imageAdjusting} onClick={() => void adjustCurrentImage("smaller")}><Minus size={14} /></button>
+              <button title="放大图片" disabled={imageAdjusting} onClick={() => void adjustCurrentImage("larger")}><Plus size={14} /></button>
+              <button title="向左移动" disabled={imageAdjusting} onClick={() => void adjustCurrentImage("left")}><ArrowLeft size={14} /></button>
+              <button title="向上移动" disabled={imageAdjusting} onClick={() => void adjustCurrentImage("up")}><ArrowUp size={14} /></button>
+              <button title="向下移动" disabled={imageAdjusting} onClick={() => void adjustCurrentImage("down")}><ArrowDown size={14} /></button>
+              <button title="向右移动" disabled={imageAdjusting} onClick={() => void adjustCurrentImage("right")}><ArrowRight size={14} /></button>
+              <button title="恢复图片原始位置和尺寸" disabled={imageAdjusting} onClick={() => void adjustCurrentImage("reset")}><RotateCcw size={14} /></button>
+            </div>
+          </div>
+        )}
         <div className="toolbar-spacer" />
         {composition.length > 0 && (
           <div className="toolbar-page-navigation">
