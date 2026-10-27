@@ -1,4 +1,4 @@
-import { type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowLeft,
@@ -6,6 +6,7 @@ import {
   ArrowUp,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Circle,
   Download,
   FileText,
@@ -21,6 +22,8 @@ import {
   Redo2,
   RotateCw,
   RotateCcw,
+  Scan,
+  Copy,
   Sparkles,
   Trash2,
   Type,
@@ -32,7 +35,7 @@ import {
   type PDFDocumentProxy,
   type PDFPageProxy,
 } from "pdfjs-dist";
-import { degrees, PDFDocument } from "pdf-lib";
+import { degrees, PDFDocument, type PDFPage as LibPdfPage, type PDFImage } from "pdf-lib";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -41,7 +44,7 @@ import "./App.css";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "draw" | "image" | "comment";
+type Tool = "select" | "text" | "highlight" | "draw" | "image" | "comment" | "crop";
 type DropTarget = "canvas" | "library" | null;
 type PdfSource = {
   id: string;
@@ -64,6 +67,16 @@ type ComposedPage = {
   sourceId: string;
   pageNumber: number;
   rotation: number;
+  stamps: PageStamp[];
+};
+type PageStamp = { id: string; dataUrl: string; x: number; y: number; width: number; height: number };
+type PageRegion = { pageId: string; x: number; y: number; width: number; height: number };
+type CopiedRegion = { pageId: string; dataUrl: string; width: number; height: number };
+type CompositionBlock = {
+  id: string;
+  sourceId: string;
+  pages: ComposedPage[];
+  startIndex: number;
 };
 
 const READING_SCALE = 4;
@@ -78,12 +91,46 @@ async function buildImagePdf(image: ImageSource) {
   return pdf.save();
 }
 
+function groupComposition(pages: ComposedPage[]) {
+  const blocks: CompositionBlock[] = [];
+  pages.forEach((page, index) => {
+    const previous = blocks[blocks.length - 1];
+    if (previous?.sourceId === page.sourceId) previous.pages.push(page);
+    else blocks.push({ id: `${page.sourceId}:${page.id}`, sourceId: page.sourceId, pages: [page], startIndex: index });
+  });
+  return blocks;
+}
+
+function displayRotation(page: PDFPageProxy, rotation: number) {
+  return (page.rotate + rotation) % 360;
+}
+
+function placeStamp(page: LibPdfPage, image: PDFImage, stamp: PageStamp) {
+  const { width: pageWidth, height: pageHeight } = page.getSize();
+  const angle = ((page.getRotation().angle % 360) + 360) % 360;
+  const { x, y, width, height } = stamp;
+  if (angle === 90) {
+    page.drawImage(image, { x: (y + height) * pageWidth, y: x * pageHeight,
+      width: width * pageHeight, height: height * pageWidth, rotate: degrees(90) });
+  } else if (angle === 180) {
+    page.drawImage(image, { x: (1 - x) * pageWidth, y: (y + height) * pageHeight,
+      width: width * pageWidth, height: height * pageHeight, rotate: degrees(180) });
+  } else if (angle === 270) {
+    page.drawImage(image, { x: (1 - y - height) * pageWidth, y: (1 - x) * pageHeight,
+      width: width * pageHeight, height: height * pageWidth, rotate: degrees(270) });
+  } else {
+    page.drawImage(image, { x: x * pageWidth, y: (1 - y - height) * pageHeight,
+      width: width * pageWidth, height: height * pageHeight });
+  }
+}
+
 const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "select", label: "选择", icon: MousePointer2 },
   { id: "text", label: "文本框", icon: Type },
   { id: "highlight", label: "高亮", icon: Highlighter },
   { id: "draw", label: "画笔", icon: PenLine },
   { id: "image", label: "图片", icon: ImagePlus },
+  { id: "crop", label: "框选复制", icon: Scan },
   { id: "comment", label: "批注", icon: MessageSquareText },
 ];
 
@@ -120,7 +167,7 @@ function PdfCanvas({
   useEffect(() => {
     if (!page || !canvasRef.current) return;
     const canvas = canvasRef.current;
-    const viewport = page.getViewport({ scale, rotation });
+    const viewport = page.getViewport({ scale, rotation: displayRotation(page, rotation) });
     const outputScale = Math.min(window.devicePixelRatio || 1, 2);
     const context = canvas.getContext("2d");
     if (!context) return;
@@ -136,6 +183,9 @@ function PdfCanvas({
       viewport,
       transform: outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0],
     });
+    void renderTask.promise.catch((error: { name?: string }) => {
+      if (error.name !== "RenderingCancelledException") console.error(error);
+    });
 
     return () => {
       renderTask.cancel();
@@ -150,6 +200,7 @@ function Thumbnail({
   sourcePageNumber,
   sequenceNumber,
   rotation,
+  stamps,
   selected,
   pageId,
   register,
@@ -164,6 +215,7 @@ function Thumbnail({
   sourcePageNumber: number;
   sequenceNumber: number;
   rotation: number;
+  stamps: PageStamp[];
   selected: boolean;
   pageId: string;
   register: (pageId: string, element: HTMLDivElement | null) => void;
@@ -179,8 +231,8 @@ function Thumbnail({
   const didDragRef = useRef(false);
   const thumbnailScale = page
     ? Math.min(
-        86 / page.getViewport({ scale: 1, rotation }).width,
-        82 / page.getViewport({ scale: 1, rotation }).height,
+        86 / page.getViewport({ scale: 1, rotation: displayRotation(page, rotation) }).width,
+        82 / page.getViewport({ scale: 1, rotation: displayRotation(page, rotation) }).height,
       )
     : 0.1;
 
@@ -230,9 +282,88 @@ function Thumbnail({
     >
       <div className="thumbnail-select">
       <div className="thumbnail-paper">
-        <PdfCanvas page={page} scale={thumbnailScale} rotation={rotation} />
+        <div className="thumbnail-layer">
+          <PdfCanvas page={page} scale={thumbnailScale} rotation={rotation} />
+          {stamps.map((stamp) => (
+            <img key={stamp.id} className="page-stamp" src={stamp.dataUrl} alt="" draggable={false} style={{
+              left: `${stamp.x * 100}%`, top: `${stamp.y * 100}%`, width: `${stamp.width * 100}%`, height: `${stamp.height * 100}%`,
+            }} />
+          ))}
+        </div>
       </div>
       <span>{sequenceNumber}</span>
+      </div>
+    </div>
+  );
+}
+
+function PdfBlock({
+  block,
+  source,
+  expanded,
+  onToggle,
+  onPointerDragStart,
+  isDragging,
+  isDropTarget,
+  dropPosition,
+}: {
+  block: CompositionBlock;
+  source: PdfSource;
+  expanded: boolean;
+  onToggle: () => void;
+  onPointerDragStart: (position: { x: number; y: number }) => void;
+  isDragging: boolean;
+  isDropTarget: boolean;
+  dropPosition: "before" | "after";
+}) {
+  const [page, setPage] = useState<PDFPageProxy | null>(null);
+  const pointerStartRef = useRef<{ x: number; y: number; pointerId: number } | null>(null);
+  const didDragRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    source.document.getPage(block.pages[0].pageNumber).then((loaded) => active && setPage(loaded));
+    return () => { active = false; };
+  }, [block.pages[0].pageNumber, source.document]);
+
+  const rotation = block.pages[0].rotation;
+  const scale = page
+    ? Math.min(52 / page.getViewport({ scale: 1, rotation: displayRotation(page, rotation) }).width, 62 / page.getViewport({ scale: 1, rotation: displayRotation(page, rotation) }).height)
+    : 0.1;
+
+  return (
+    <div
+      className={`pdf-block ${expanded ? "expanded" : ""} ${isDragging ? "dragging" : ""} ${isDropTarget ? `drop-${dropPosition}` : ""}`}
+      data-composition-block={block.id}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        pointerStartRef.current = { x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+        didDragRef.current = false;
+      }}
+      onPointerMove={(event) => {
+        const start = pointerStartRef.current;
+        if (!start || start.pointerId !== event.pointerId || didDragRef.current) return;
+        if (Math.hypot(event.clientX - start.x, event.clientY - start.y) < 6) return;
+        didDragRef.current = true;
+        onPointerDragStart({ x: event.clientX, y: event.clientY });
+      }}
+      onPointerUp={(event) => {
+        if (pointerStartRef.current?.pointerId === event.pointerId) pointerStartRef.current = null;
+      }}
+      onPointerCancel={() => { pointerStartRef.current = null; }}
+      onClick={() => {
+        if (didDragRef.current) {
+          didDragRef.current = false;
+          return;
+        }
+        onToggle();
+      }}
+    >
+      <div className="pdf-block-summary">
+        <div className="pdf-block-paper"><PdfCanvas page={page} scale={scale} rotation={rotation} /></div>
+        <span className="pdf-block-copy"><strong>{source.name}</strong><small>{block.pages.length} 页</small></span>
+        <ChevronDown className="pdf-block-chevron" size={15} />
       </div>
     </div>
   );
@@ -264,7 +395,7 @@ function DragPreview({
   }, [document, sourcePageNumber]);
 
   const scale = page
-    ? Math.min(92 / page.getViewport({ scale: 1, rotation }).width, 112 / page.getViewport({ scale: 1, rotation }).height)
+    ? Math.min(92 / page.getViewport({ scale: 1, rotation: displayRotation(page, rotation) }).width, 112 / page.getViewport({ scale: 1, rotation: displayRotation(page, rotation) }).height)
     : 0.1;
   const stackDepth = Math.min(count - 1, 4);
 
@@ -292,22 +423,52 @@ function DragPreview({
 
 function ContinuousPage({
   document,
+  pageId,
   pageNumber,
   sequenceNumber,
   rotation,
   canvasSize,
   zoom,
   register,
+  cropActive,
+  pasteActive,
+  clipboardPreview,
+  selection,
+  stamps,
+  onSelectRegion,
+  onPaste,
+  onCopy,
 }: {
   document: PDFDocumentProxy;
+  pageId: string;
   pageNumber: number;
   sequenceNumber: number;
   rotation: number;
   canvasSize: { width: number; height: number };
   zoom: number;
   register: (pageNumber: number, element: HTMLDivElement | null) => void;
+  cropActive: boolean;
+  pasteActive: boolean;
+  clipboardPreview: CopiedRegion | null;
+  selection: PageRegion | null;
+  stamps: PageStamp[];
+  onSelectRegion: (region: PageRegion | null) => void;
+  onPaste: (pageId: string, x: number, y: number) => void;
+  onCopy: () => void;
 }) {
   const [page, setPage] = useState<PDFPageProxy | null>(null);
+  const pageContainerRef = useRef<HTMLDivElement | null>(null);
+  const [nearViewport, setNearViewport] = useState(false);
+  const selectionStart = useRef<{ x: number; y: number; pointerId: number } | null>(null);
+  const [pastePoint, setPastePoint] = useState<{ x: number; y: number } | null>(null);
+
+  const pointOnPage = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height)),
+    };
+  };
 
   useEffect(() => {
     let active = true;
@@ -317,7 +478,19 @@ function ContinuousPage({
     };
   }, [document, pageNumber]);
 
-  const viewport = page?.getViewport({ scale: 1, rotation });
+  useEffect(() => {
+    const element = pageContainerRef.current;
+    if (!element) return;
+    const root = element.closest<HTMLDivElement>(".canvas-scroll");
+    const observer = new IntersectionObserver(
+      ([entry]) => setNearViewport(entry.isIntersecting),
+      { root, rootMargin: "900px 0px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const viewport = page?.getViewport({ scale: 1, rotation: displayRotation(page, rotation) });
   const fitScale = viewport
     ? Math.min(
         Math.max(canvasSize.width - 120, 240) / viewport.width,
@@ -327,11 +500,76 @@ function ContinuousPage({
 
   return (
     <div
-      className="continuous-page"
+      className={`continuous-page ${cropActive ? "crop-active" : ""} ${pasteActive ? "paste-active" : ""}`}
       data-page-number={sequenceNumber}
-      ref={(element) => register(sequenceNumber, element)}
+      data-page-id={pageId}
+      ref={(element) => {
+        pageContainerRef.current = element;
+        register(sequenceNumber, element);
+      }}
+      onPointerDown={(event) => {
+        if (!cropActive || event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+        const point = pointOnPage(event);
+        if (pasteActive) {
+          onPaste(pageId, point.x, point.y);
+          return;
+        }
+        event.currentTarget.setPointerCapture(event.pointerId);
+        selectionStart.current = { ...point, pointerId: event.pointerId };
+        onSelectRegion({ pageId, ...point, width: 0, height: 0 });
+      }}
+      onPointerMove={(event) => {
+        if (cropActive && pasteActive) setPastePoint(pointOnPage(event));
+        const start = selectionStart.current;
+        if (!start || start.pointerId !== event.pointerId) return;
+        const point = pointOnPage(event);
+        onSelectRegion({
+          pageId,
+          x: Math.min(start.x, point.x),
+          y: Math.min(start.y, point.y),
+          width: Math.abs(point.x - start.x),
+          height: Math.abs(point.y - start.y),
+        });
+      }}
+      onPointerUp={(event) => {
+        if (selectionStart.current?.pointerId === event.pointerId) selectionStart.current = null;
+      }}
+      onPointerCancel={() => { selectionStart.current = null; }}
+      onPointerLeave={() => setPastePoint(null)}
     >
-      <PdfCanvas page={page} scale={fitScale * READING_SCALE * (zoom / 100)} rotation={rotation} className="main-pdf-page" />
+      {nearViewport ? (
+        <PdfCanvas page={page} scale={fitScale * READING_SCALE * (zoom / 100)} rotation={rotation} className="main-pdf-page" />
+      ) : (
+        <div className="main-pdf-placeholder" style={{
+          width: viewport ? viewport.width * fitScale * READING_SCALE * (zoom / 100) : 600,
+          height: viewport ? viewport.height * fitScale * READING_SCALE * (zoom / 100) : 800,
+        }} />
+      )}
+      {stamps.map((stamp) => (
+        <img key={stamp.id} className="page-stamp" src={stamp.dataUrl} alt="" draggable={false} style={{
+          left: `${stamp.x * 100}%`, top: `${stamp.y * 100}%`, width: `${stamp.width * 100}%`, height: `${stamp.height * 100}%`,
+        }} />
+      ))}
+      {cropActive && pasteActive && pastePoint && clipboardPreview?.pageId === pageId && (
+        <img className="page-paste-preview" src={clipboardPreview.dataUrl} alt="" draggable={false} style={{
+          left: `${Math.max(0, Math.min(1 - clipboardPreview.width, pastePoint.x - clipboardPreview.width / 2)) * 100}%`,
+          top: `${Math.max(0, Math.min(1 - clipboardPreview.height, pastePoint.y - clipboardPreview.height / 2)) * 100}%`,
+          width: `${clipboardPreview.width * 100}%`, height: `${clipboardPreview.height * 100}%`,
+        }} />
+      )}
+      {cropActive && selection?.pageId === pageId && selection.width > 0 && selection.height > 0 && (
+        <>
+          <div className="page-region" style={{
+            left: `${selection.x * 100}%`, top: `${selection.y * 100}%`,
+            width: `${selection.width * 100}%`, height: `${selection.height * 100}%`,
+          }} />
+          {!pasteActive && (
+            <button className="page-region-copy" style={{
+              left: `${selection.x * 100}%`, top: `${Math.min(1, selection.y + selection.height) * 100}%`,
+            }} onClick={onCopy}><Copy size={14} />复制选区</button>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -395,10 +633,17 @@ function App() {
   const [draggedPageIndex, setDraggedPageIndex] = useState<number | null>(null);
   const [draggedPageIds, setDraggedPageIds] = useState<Set<string>>(new Set());
   const [dropPageIndex, setDropPageIndex] = useState<number | null>(null);
+  const [draggedBlockId, setDraggedBlockId] = useState<string | null>(null);
+  const [dropBlockId, setDropBlockId] = useState<string | null>(null);
+  const [dropBlockPosition, setDropBlockPosition] = useState<"before" | "after">("before");
+  const [expandedBlockIds, setExpandedBlockIds] = useState<Set<string>>(new Set());
   const [dragPointer, setDragPointer] = useState<{ x: number; y: number } | null>(null);
   const [selectedPageIds, setSelectedPageIds] = useState<Set<string>>(new Set());
   const [selectionAnchorIndex, setSelectionAnchorIndex] = useState<number | null>(null);
   const [selectionFocusIndex, setSelectionFocusIndex] = useState<number | null>(null);
+  const [selectedRegion, setSelectedRegion] = useState<PageRegion | null>(null);
+  const [copiedRegion, setCopiedRegion] = useState<CopiedRegion | null>(null);
+  const [pasteActive, setPasteActive] = useState(false);
   const [pageContextMenu, setPageContextMenu] = useState<{ x: number; y: number; pageId: string } | null>(null);
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
   const document = activeSource?.document ?? null;
@@ -407,6 +652,7 @@ function App() {
   const currentImageSource = currentComposedPage
     ? sources.find((source) => source.id === currentComposedPage.sourceId && source.image)?.image
     : undefined;
+  const compositionBlocks = groupComposition(composition);
 
   useEffect(() => {
     sourcesRef.current = sources;
@@ -598,6 +844,42 @@ function App() {
     setPageNumber((current) => Math.max(1, Math.min(current, next.length)));
   }
 
+  function copySelectedRegion() {
+    const region = selectedRegion;
+    if (!region || region.width < 0.003 || region.height < 0.003) return;
+    const index = compositionRef.current.findIndex((page) => page.id === region.pageId);
+    const canvas = pageElementsRef.current.get(index + 1)?.querySelector<HTMLCanvasElement>(".main-pdf-page");
+    if (!canvas?.width || !canvas.height) return;
+    const x = Math.floor(region.x * canvas.width);
+    const y = Math.floor(region.y * canvas.height);
+    const width = Math.min(canvas.width - x, Math.max(1, Math.ceil(region.width * canvas.width)));
+    const height = Math.min(canvas.height - y, Math.max(1, Math.ceil(region.height * canvas.height)));
+    const clipped = globalThis.document.createElement("canvas");
+    clipped.width = width;
+    clipped.height = height;
+    clipped.getContext("2d")?.drawImage(canvas, x, y, width, height, 0, 0, width, height);
+    setCopiedRegion({ pageId: region.pageId, dataUrl: clipped.toDataURL("image/png"), width: region.width, height: region.height });
+    setSelectedRegion(null);
+    setPasteActive(true);
+  }
+
+  function pasteCopiedRegion(pageId: string, centerX: number, centerY: number) {
+    if (!copiedRegion) return;
+    if (pageId !== copiedRegion.pageId) {
+      setError("请在框选来源页内粘贴。");
+      return;
+    }
+    const stamp: PageStamp = {
+      id: crypto.randomUUID(), dataUrl: copiedRegion.dataUrl,
+      width: copiedRegion.width, height: copiedRegion.height,
+      x: Math.max(0, Math.min(1 - copiedRegion.width, centerX - copiedRegion.width / 2)),
+      y: Math.max(0, Math.min(1 - copiedRegion.height, centerY - copiedRegion.height / 2)),
+    };
+    commitComposition(compositionRef.current.map((page) => (
+      page.id === pageId ? { ...page, stamps: [...page.stamps, stamp] } : page
+    )));
+  }
+
   function registerThumbnail(pageId: string, element: HTMLDivElement | null) {
     if (element) thumbnailElementsRef.current.set(pageId, element);
     else thumbnailElementsRef.current.delete(pageId);
@@ -621,6 +903,36 @@ function App() {
     setDragPointer(position);
     setDraggedPageIds(ids);
     setDraggedPageIndex(index);
+  }
+
+  function toggleBlock(blockId: string) {
+    setExpandedBlockIds((current) => {
+      const next = new Set(current);
+      if (next.has(blockId)) next.delete(blockId);
+      else next.add(blockId);
+      return next;
+    });
+  }
+
+  function moveBlock(blockId: string, targetBlockId: string, position: "before" | "after") {
+    if (blockId === targetBlockId) return;
+    const blocks = groupComposition(compositionRef.current);
+    const moving = blocks.find((block) => block.id === blockId);
+    const target = blocks.find((block) => block.id === targetBlockId);
+    if (!moving || !target) return;
+    const movingIds = new Set(moving.pages.map((page) => page.id));
+    const remaining = compositionRef.current.filter((page) => !movingIds.has(page.id));
+    const targetIndex = remaining.findIndex((page) => page.id === target.pages[0].id);
+    if (targetIndex < 0) return;
+    const insertAt = targetIndex + (position === "after" ? target.pages.length : 0);
+    remaining.splice(insertAt, 0, ...moving.pages);
+    if (remaining.every((page, index) => page.id === compositionRef.current[index]?.id)) return;
+    commitComposition(remaining);
+  }
+
+  function beginBlockDrag(blockId: string, position: { x: number; y: number }) {
+    setDragPointer(position);
+    setDraggedBlockId(blockId);
   }
 
   useEffect(() => {
@@ -683,6 +995,51 @@ function App() {
   }, [draggedPageIndex, draggedPageIds, dropPageIndex]);
 
   useEffect(() => {
+    if (!draggedBlockId) return;
+    let lastPointer: { x: number; y: number } | null = null;
+    let scrollFrame: number | null = null;
+    const findTarget = (x: number, y: number) => {
+      const target = globalThis.document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-composition-block]");
+      setDropBlockId(target?.dataset.compositionBlock ?? null);
+      if (target) setDropBlockPosition(y < target.getBoundingClientRect().top + target.getBoundingClientRect().height / 2 ? "before" : "after");
+    };
+    const autoScroll = () => {
+      scrollFrame = null;
+      const list = thumbnailsRef.current;
+      if (!list || !lastPointer) return;
+      const bounds = list.getBoundingClientRect();
+      if (lastPointer.x < bounds.left || lastPointer.x > bounds.right) return;
+      const edge = 54;
+      const direction = lastPointer.y - bounds.top < edge ? -1 : bounds.bottom - lastPointer.y < edge ? 1 : 0;
+      if (!direction) return;
+      list.scrollTop += direction * 12;
+      findTarget(lastPointer.x, lastPointer.y);
+      scrollFrame = requestAnimationFrame(autoScroll);
+    };
+    const move = (event: PointerEvent) => {
+      lastPointer = { x: event.clientX, y: event.clientY };
+      setDragPointer(lastPointer);
+      findTarget(event.clientX, event.clientY);
+      if (scrollFrame === null) scrollFrame = requestAnimationFrame(autoScroll);
+    };
+    const finish = () => {
+      if (dropBlockId && dropBlockId !== draggedBlockId) moveBlock(draggedBlockId, dropBlockId, dropBlockPosition);
+      setDraggedBlockId(null);
+      setDropBlockId(null);
+      setDragPointer(null);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      if (scrollFrame !== null) cancelAnimationFrame(scrollFrame);
+    };
+  }, [draggedBlockId, dropBlockId, dropBlockPosition]);
+
+  useEffect(() => {
     const element = canvasScrollRef.current;
     if (!element) return;
 
@@ -701,6 +1058,23 @@ function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && activeTool === "crop") {
+        setPasteActive(false);
+        setSelectedRegion(null);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && activeTool === "crop") {
+        if (event.key.toLowerCase() === "c" && selectedRegion) {
+          event.preventDefault();
+          copySelectedRegion();
+          return;
+        }
+        if (event.key.toLowerCase() === "v" && copiedRegion) {
+          event.preventDefault();
+          setPasteActive(true);
+          return;
+        }
+      }
       if (event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && composition.length) {
         event.preventDefault();
         const direction = event.key === "ArrowUp" ? -1 : 1;
@@ -746,7 +1120,7 @@ function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [composition, pageNumber, selectedPageIds, selectionAnchorIndex, selectionFocusIndex]);
+  }, [composition, pageNumber, selectedPageIds, selectionAnchorIndex, selectionFocusIndex, activeTool, selectedRegion, copiedRegion]);
 
   async function openFile(file?: File) {
     if (!file) return;
@@ -843,6 +1217,7 @@ function App() {
         sourceId: source.id,
         pageNumber: index + 1,
         rotation: 0,
+        stamps: [],
       }));
     const insertionIndex = insertAfter === undefined
       ? compositionRef.current.length
@@ -1056,9 +1431,19 @@ function App() {
           await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         }
       }
+      const stampImages = new Map<string, PDFImage>();
       for (const page of composition) {
         const copiedPage = copiedPages.get(page.id);
-        if (copiedPage) output.addPage(copiedPage);
+        if (!copiedPage) continue;
+        for (const stamp of page.stamps) {
+          let image = stampImages.get(stamp.dataUrl);
+          if (!image) {
+            image = await output.embedPng(stamp.dataUrl);
+            stampImages.set(stamp.dataUrl, image);
+          }
+          placeStamp(copiedPage, image, stamp);
+        }
+        output.addPage(copiedPage);
       }
       setExportProgress({ value: 92, stage: "正在生成 PDF 文件" });
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -1142,6 +1527,10 @@ function App() {
               className={`tool-button ${activeTool === id ? "active" : ""}`}
               onClick={() => {
                 setActiveTool(id);
+                if (id !== "crop") {
+                  setSelectedRegion(null);
+                  setPasteActive(false);
+                }
                 if (id === "image") imageInputRef.current?.click();
               }}
               title={label}
@@ -1153,6 +1542,13 @@ function App() {
         </div>
         <div className="toolbar-divider" />
         <button className="tool-button" title="顺时针旋转 90°" disabled={!composition.length} onClick={rotateSelectedPages}><RotateCw size={19} /><span>旋转</span></button>
+        {activeTool === "crop" && (
+          <div className="crop-actions">
+            <span>{pasteActive ? "单击原页面粘贴 · Esc 退出" : "在页面上拖动框选"}</span>
+            <button disabled={!selectedRegion || selectedRegion.width < 0.003 || selectedRegion.height < 0.003} onClick={copySelectedRegion}><Copy size={14} />复制</button>
+            <button disabled={!copiedRegion} className={pasteActive ? "active" : ""} onClick={() => setPasteActive(true)}>粘贴</button>
+          </div>
+        )}
         {currentImageSource && (
           <div className="image-adjustments" aria-label="图片调整">
             <span>图片调整</span>
@@ -1207,26 +1603,49 @@ function App() {
           />
           <div className="thumbnails collapsible-content" ref={thumbnailsRef} onScroll={captureThumbnailPositions}>
             {composition.length ? (
-              composition.map((page, index) => {
-                const source = sources.find((item) => item.id === page.sourceId);
+              compositionBlocks.map((block) => {
+                const source = sources.find((item) => item.id === block.sourceId);
                 if (!source) return null;
+                const expanded = expandedBlockIds.has(block.id);
                 return (
-                <Thumbnail
-                  key={page.id}
-                  document={source.document}
-                  sourcePageNumber={page.pageNumber}
-                  sequenceNumber={index + 1}
-                  rotation={page.rotation}
-                  selected={selectedPageIds.has(page.id)}
-                  pageId={page.id}
-                  register={registerThumbnail}
-                  onSelect={(event) => selectCompositionPage(index, event)}
-                  onContextMenu={(position) => openPageContextMenu(index, position)}
-                  onPointerDragStart={(position) => beginPageDrag(index, position)}
-                  compositionIndex={index}
-                  isDragging={draggedPageIds.has(page.id)}
-                  isDropTarget={dropPageIndex === index && !draggedPageIds.has(page.id)}
-                />
+                  <div className="pdf-block-group" key={block.id}>
+                    <PdfBlock
+                      block={block}
+                      source={source}
+                      expanded={expanded}
+                      onToggle={() => toggleBlock(block.id)}
+                      onPointerDragStart={(position) => beginBlockDrag(block.id, position)}
+                      isDragging={draggedBlockId === block.id}
+                      isDropTarget={dropBlockId === block.id && draggedBlockId !== block.id}
+                      dropPosition={dropBlockPosition}
+                    />
+                    {expanded && (
+                      <div className="pdf-block-pages">
+                        {block.pages.map((page, offset) => {
+                          const index = block.startIndex + offset;
+                          return (
+                            <Thumbnail
+                              key={page.id}
+                              document={source.document}
+                              sourcePageNumber={page.pageNumber}
+                              sequenceNumber={index + 1}
+                              rotation={page.rotation}
+                              stamps={page.stamps}
+                              selected={selectedPageIds.has(page.id)}
+                              pageId={page.id}
+                              register={registerThumbnail}
+                              onSelect={(event) => selectCompositionPage(index, event)}
+                              onContextMenu={(position) => openPageContextMenu(index, position)}
+                              onPointerDragStart={(position) => beginPageDrag(index, position)}
+                              compositionIndex={index}
+                              isDragging={draggedPageIds.has(page.id)}
+                              isDropTarget={dropPageIndex === index && !draggedPageIds.has(page.id)}
+                            />
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 );
               })
             ) : (
@@ -1270,6 +1689,15 @@ function App() {
                       pageNumber={page.pageNumber}
                       sequenceNumber={index + 1}
                       rotation={page.rotation}
+                      pageId={page.id}
+                      cropActive={activeTool === "crop"}
+                      pasteActive={pasteActive}
+                      clipboardPreview={copiedRegion}
+                      selection={selectedRegion}
+                      stamps={page.stamps}
+                      onSelectRegion={setSelectedRegion}
+                      onPaste={pasteCopiedRegion}
+                      onCopy={copySelectedRegion}
                       canvasSize={canvasSize}
                       zoom={zoom}
                       register={registerPage}
@@ -1380,6 +1808,21 @@ function App() {
             sequenceNumber={draggedPageIndex + 1}
             rotation={draggedPage.rotation}
             count={draggedPageIds.size}
+            position={dragPointer}
+          />
+        );
+      })()}
+      {draggedBlockId && dragPointer && (() => {
+        const block = groupComposition(composition).find((item) => item.id === draggedBlockId);
+        const source = block && sources.find((item) => item.id === block.sourceId);
+        const firstPage = block?.pages[0];
+        return source && firstPage && (
+          <DragPreview
+            document={source.document}
+            sourcePageNumber={firstPage.pageNumber}
+            sequenceNumber={block.startIndex + 1}
+            rotation={firstPage.rotation}
+            count={block.pages.length}
             position={dragPointer}
           />
         );
