@@ -844,10 +844,12 @@ function App() {
     setPageNumber((current) => Math.max(1, Math.min(current, next.length)));
   }
 
-  function copySelectedRegion() {
+  async function copySelectedRegion() {
     const region = selectedRegion;
     if (!region || region.width < 0.003 || region.height < 0.003) return;
     const index = compositionRef.current.findIndex((page) => page.id === region.pageId);
+    if (index < 0) return;
+    const stamps = compositionRef.current[index].stamps;
     const canvas = pageElementsRef.current.get(index + 1)?.querySelector<HTMLCanvasElement>(".main-pdf-page");
     if (!canvas?.width || !canvas.height) return;
     const x = Math.floor(region.x * canvas.width);
@@ -857,10 +859,33 @@ function App() {
     const clipped = globalThis.document.createElement("canvas");
     clipped.width = width;
     clipped.height = height;
-    clipped.getContext("2d")?.drawImage(canvas, x, y, width, height, 0, 0, width, height);
-    setCopiedRegion({ pageId: region.pageId, dataUrl: clipped.toDataURL("image/png"), width: region.width, height: region.height });
-    setSelectedRegion(null);
-    setPasteActive(true);
+    const context = clipped.getContext("2d");
+    if (!context) return;
+    context.drawImage(canvas, x, y, width, height, 0, 0, width, height);
+    try {
+      // Stamps are separate DOM images above the PDF canvas. Composite them in
+      // display order so a second selection captures what the user actually sees.
+      const images = await Promise.all(stamps.map(async (stamp) => {
+        const image = new Image();
+        image.src = stamp.dataUrl;
+        await image.decode();
+        return image;
+      }));
+      stamps.forEach((stamp, stampIndex) => {
+        context.drawImage(
+          images[stampIndex],
+          stamp.x * canvas.width - x,
+          stamp.y * canvas.height - y,
+          stamp.width * canvas.width,
+          stamp.height * canvas.height,
+        );
+      });
+      setCopiedRegion({ pageId: region.pageId, dataUrl: clipped.toDataURL("image/png"), width: region.width, height: region.height });
+      setSelectedRegion(null);
+      setPasteActive(true);
+    } catch {
+      setError("无法读取页面贴片，请稍后重试复制。");
+    }
   }
 
   function pasteCopiedRegion(pageId: string, centerX: number, centerY: number) {
