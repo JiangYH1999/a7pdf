@@ -24,6 +24,7 @@ import {
   RotateCcw,
   Scan,
   Copy,
+  Signature,
   Sparkles,
   Trash2,
   Type,
@@ -44,7 +45,7 @@ import "./App.css";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "draw" | "image" | "comment" | "crop";
+type Tool = "select" | "text" | "highlight" | "draw" | "image" | "comment" | "crop" | "signature";
 type DropTarget = "canvas" | "library" | null;
 type PdfSource = {
   id: string;
@@ -71,7 +72,7 @@ type ComposedPage = {
 };
 type PageStamp = { id: string; dataUrl: string; x: number; y: number; width: number; height: number };
 type PageRegion = { pageId: string; x: number; y: number; width: number; height: number };
-type CopiedRegion = { pageId: string; dataUrl: string; width: number; height: number };
+type CopiedRegion = { dataUrl: string; width: number; aspectRatio: number; kind: "region" | "signature" };
 type CompositionBlock = {
   id: string;
   sourceId: string;
@@ -105,6 +106,11 @@ function displayRotation(page: PDFPageProxy, rotation: number) {
   return (page.rotate + rotation) % 360;
 }
 
+function stampSize(region: CopiedRegion, pageAspectRatio: number) {
+  const width = Math.min(region.width, 0.85, 0.85 * region.aspectRatio / pageAspectRatio);
+  return { width, height: width * pageAspectRatio / region.aspectRatio };
+}
+
 function placeStamp(page: LibPdfPage, image: PDFImage, stamp: PageStamp) {
   const { width: pageWidth, height: pageHeight } = page.getSize();
   const angle = ((page.getRotation().angle % 360) + 360) % 360;
@@ -131,6 +137,7 @@ const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "draw", label: "画笔", icon: PenLine },
   { id: "image", label: "图片", icon: ImagePlus },
   { id: "crop", label: "框选复制", icon: Scan },
+  { id: "signature", label: "签名 PDF", icon: Signature },
   { id: "comment", label: "批注", icon: MessageSquareText },
 ];
 
@@ -431,13 +438,17 @@ function ContinuousPage({
   zoom,
   register,
   cropActive,
+  stampEditingActive,
   pasteActive,
   clipboardPreview,
   selection,
   stamps,
+  selectedStampId,
   onSelectRegion,
   onPaste,
   onCopy,
+  onSelectStamp,
+  onUpdateStamp,
 }: {
   document: PDFDocumentProxy;
   pageId: string;
@@ -448,19 +459,25 @@ function ContinuousPage({
   zoom: number;
   register: (pageNumber: number, element: HTMLDivElement | null) => void;
   cropActive: boolean;
+  stampEditingActive: boolean;
   pasteActive: boolean;
   clipboardPreview: CopiedRegion | null;
   selection: PageRegion | null;
   stamps: PageStamp[];
+  selectedStampId: string | null;
   onSelectRegion: (region: PageRegion | null) => void;
-  onPaste: (pageId: string, x: number, y: number) => void;
+  onPaste: (pageId: string, x: number, y: number, pageAspectRatio: number) => void;
   onCopy: () => void;
+  onSelectStamp: (id: string) => void;
+  onUpdateStamp: (pageId: string, stampId: string, layout: Pick<PageStamp, "x" | "y" | "width" | "height">) => void;
 }) {
   const [page, setPage] = useState<PDFPageProxy | null>(null);
   const pageContainerRef = useRef<HTMLDivElement | null>(null);
   const [nearViewport, setNearViewport] = useState(false);
   const selectionStart = useRef<{ x: number; y: number; pointerId: number } | null>(null);
   const [pastePoint, setPastePoint] = useState<{ x: number; y: number } | null>(null);
+  const [stampDraft, setStampDraft] = useState<PageStamp | null>(null);
+  const stampDrag = useRef<{ pointerId: number; startX: number; startY: number; stamp: PageStamp; resize: boolean } | null>(null);
 
   const pointOnPage = (event: ReactPointerEvent<HTMLDivElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -491,6 +508,7 @@ function ContinuousPage({
   }, []);
 
   const viewport = page?.getViewport({ scale: 1, rotation: displayRotation(page, rotation) });
+  const previewSize = clipboardPreview ? stampSize(clipboardPreview, viewport ? viewport.width / viewport.height : 1) : null;
   const fitScale = viewport
     ? Math.min(
         Math.max(canvasSize.width - 120, 240) / viewport.width,
@@ -511,7 +529,8 @@ function ContinuousPage({
         if (!cropActive || event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
         const point = pointOnPage(event);
         if (pasteActive) {
-          onPaste(pageId, point.x, point.y);
+          const bounds = event.currentTarget.getBoundingClientRect();
+          onPaste(pageId, point.x, point.y, bounds.width / bounds.height);
           return;
         }
         event.currentTarget.setPointerCapture(event.pointerId);
@@ -545,16 +564,59 @@ function ContinuousPage({
           height: viewport ? viewport.height * fitScale * READING_SCALE * (zoom / 100) : 800,
         }} />
       )}
-      {stamps.map((stamp) => (
-        <img key={stamp.id} className="page-stamp" src={stamp.dataUrl} alt="" draggable={false} style={{
-          left: `${stamp.x * 100}%`, top: `${stamp.y * 100}%`, width: `${stamp.width * 100}%`, height: `${stamp.height * 100}%`,
-        }} />
-      ))}
-      {cropActive && pasteActive && pastePoint && clipboardPreview?.pageId === pageId && (
+      {stamps.map((stamp) => {
+        const layout = stampDraft?.id === stamp.id ? stampDraft : stamp;
+        return stampEditingActive ? (
+          <div key={stamp.id} className={`page-stamp-editor ${selectedStampId === stamp.id ? "selected" : ""}`}
+            style={{ left: `${layout.x * 100}%`, top: `${layout.y * 100}%`, width: `${layout.width * 100}%`, height: `${layout.height * 100}%` }}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              event.stopPropagation();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              onSelectStamp(stamp.id);
+              stampDrag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
+                stamp: layout, resize: (event.target as HTMLElement).classList.contains("page-stamp-resize") };
+            }}
+            onPointerMove={(event) => {
+              const drag = stampDrag.current;
+              if (!drag || drag.pointerId !== event.pointerId) return;
+              const bounds = pageContainerRef.current?.getBoundingClientRect();
+              if (!bounds) return;
+              const dx = (event.clientX - drag.startX) / bounds.width;
+              const dy = (event.clientY - drag.startY) / bounds.height;
+              if (drag.resize) {
+                const ratio = drag.stamp.height / drag.stamp.width;
+                const maxWidth = Math.min(1 - drag.stamp.x, (1 - drag.stamp.y) / ratio);
+                const width = Math.max(Math.min(0.02, maxWidth), Math.min(maxWidth, drag.stamp.width + dx));
+                setStampDraft({ ...drag.stamp, width, height: width * ratio });
+              } else {
+                setStampDraft({ ...drag.stamp,
+                  x: Math.max(0, Math.min(1 - drag.stamp.width, drag.stamp.x + dx)),
+                  y: Math.max(0, Math.min(1 - drag.stamp.height, drag.stamp.y + dy)) });
+              }
+            }}
+            onPointerUp={(event) => {
+              if (stampDrag.current?.pointerId !== event.pointerId) return;
+              if (stampDraft?.id === stamp.id) onUpdateStamp(pageId, stamp.id, stampDraft);
+              stampDrag.current = null;
+              setStampDraft(null);
+            }}
+            onPointerCancel={() => { stampDrag.current = null; setStampDraft(null); }}
+          >
+            <img src={stamp.dataUrl} alt="签名或贴片" draggable={false} />
+            {selectedStampId === stamp.id && <span className="page-stamp-resize" aria-label="调整贴片大小" />}
+          </div>
+        ) : (
+          <img key={stamp.id} className="page-stamp" src={stamp.dataUrl} alt="" draggable={false} style={{
+            left: `${layout.x * 100}%`, top: `${layout.y * 100}%`, width: `${layout.width * 100}%`, height: `${layout.height * 100}%`,
+          }} />
+        );
+      })}
+      {cropActive && pasteActive && pastePoint && clipboardPreview && previewSize && (
         <img className="page-paste-preview" src={clipboardPreview.dataUrl} alt="" draggable={false} style={{
-          left: `${Math.max(0, Math.min(1 - clipboardPreview.width, pastePoint.x - clipboardPreview.width / 2)) * 100}%`,
-          top: `${Math.max(0, Math.min(1 - clipboardPreview.height, pastePoint.y - clipboardPreview.height / 2)) * 100}%`,
-          width: `${clipboardPreview.width * 100}%`, height: `${clipboardPreview.height * 100}%`,
+          left: `${Math.max(0, Math.min(1 - previewSize.width, pastePoint.x - previewSize.width / 2)) * 100}%`,
+          top: `${Math.max(0, Math.min(1 - previewSize.height, pastePoint.y - previewSize.height / 2)) * 100}%`,
+          width: `${previewSize.width * 100}%`, height: `${previewSize.height * 100}%`,
         }} />
       )}
       {cropActive && selection?.pageId === pageId && selection.width > 0 && selection.height > 0 && (
@@ -600,6 +662,7 @@ function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const signatureInputRef = useRef<HTMLInputElement>(null);
   const canvasAreaRef = useRef<HTMLElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
   const thumbnailsRef = useRef<HTMLDivElement>(null);
@@ -643,6 +706,7 @@ function App() {
   const [selectionFocusIndex, setSelectionFocusIndex] = useState<number | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<PageRegion | null>(null);
   const [copiedRegion, setCopiedRegion] = useState<CopiedRegion | null>(null);
+  const [selectedStampId, setSelectedStampId] = useState<string | null>(null);
   const [pasteActive, setPasteActive] = useState(false);
   const [pageContextMenu, setPageContextMenu] = useState<{ x: number; y: number; pageId: string } | null>(null);
   const activeSource = sources.find((source) => source.id === activeSourceId) ?? null;
@@ -880,7 +944,8 @@ function App() {
           stamp.height * canvas.height,
         );
       });
-      setCopiedRegion({ pageId: region.pageId, dataUrl: clipped.toDataURL("image/png"), width: region.width, height: region.height });
+      setCopiedRegion({ dataUrl: clipped.toDataURL("image/png"), width: region.width,
+        aspectRatio: clipped.width / clipped.height, kind: "region" });
       setSelectedRegion(null);
       setPasteActive(true);
     } catch {
@@ -888,21 +953,32 @@ function App() {
     }
   }
 
-  function pasteCopiedRegion(pageId: string, centerX: number, centerY: number) {
+  function pasteCopiedRegion(pageId: string, centerX: number, centerY: number, pageAspectRatio: number) {
     if (!copiedRegion) return;
-    if (pageId !== copiedRegion.pageId) {
-      setError("请在框选来源页内粘贴。");
-      return;
-    }
+    const { width, height } = stampSize(copiedRegion, pageAspectRatio);
     const stamp: PageStamp = {
       id: crypto.randomUUID(), dataUrl: copiedRegion.dataUrl,
-      width: copiedRegion.width, height: copiedRegion.height,
-      x: Math.max(0, Math.min(1 - copiedRegion.width, centerX - copiedRegion.width / 2)),
-      y: Math.max(0, Math.min(1 - copiedRegion.height, centerY - copiedRegion.height / 2)),
+      width, height,
+      x: Math.max(0, Math.min(1 - width, centerX - width / 2)),
+      y: Math.max(0, Math.min(1 - height, centerY - height / 2)),
     };
     commitComposition(compositionRef.current.map((page) => (
       page.id === pageId ? { ...page, stamps: [...page.stamps, stamp] } : page
     )));
+    if (copiedRegion.kind === "signature") {
+      setPasteActive(false);
+      setActiveTool("select");
+      setSelectedStampId(stamp.id);
+    }
+  }
+
+  function updateStamp(pageId: string, stampId: string, layout: Pick<PageStamp, "x" | "y" | "width" | "height">) {
+    const page = compositionRef.current.find((item) => item.id === pageId);
+    const stamp = page?.stamps.find((item) => item.id === stampId);
+    if (!stamp || (stamp.x === layout.x && stamp.y === layout.y && stamp.width === layout.width && stamp.height === layout.height)) return;
+    commitComposition(compositionRef.current.map((item) => item.id === pageId
+      ? { ...item, stamps: item.stamps.map((entry) => entry.id === stampId ? { ...entry, ...layout } : entry) }
+      : item));
   }
 
   function registerThumbnail(pageId: string, element: HTMLDivElement | null) {
@@ -1199,6 +1275,51 @@ function App() {
     } catch {
       setError("无法导入这张图片，请检查文件是否损坏。");
     } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openSignaturePdf(file?: File) {
+    if (!file) return;
+    setLoading(true);
+    setError("");
+    let signatureTask: ReturnType<typeof getDocument> | null = null;
+    try {
+      signatureTask = getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+      const signatureDocument = await signatureTask.promise;
+      const page = await signatureDocument.getPage(1);
+      const natural = page.getViewport({ scale: 1 });
+      const viewport = page.getViewport({ scale: Math.min(3, 2400 / Math.max(natural.width, natural.height)) });
+      const canvas = globalThis.document.createElement("canvas");
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas unavailable");
+      await page.render({ canvas, canvasContext: context, viewport, background: "rgba(0, 0, 0, 0)" }).promise;
+      const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+      let left = canvas.width; let top = canvas.height; let right = -1; let bottom = -1;
+      for (let y = 0; y < canvas.height; y += 1) {
+        for (let x = 0; x < canvas.width; x += 1) {
+          if (data[(y * canvas.width + x) * 4 + 3] < 8) continue;
+          left = Math.min(left, x); top = Math.min(top, y);
+          right = Math.max(right, x); bottom = Math.max(bottom, y);
+        }
+      }
+      if (right < left) throw new Error("No visible signature");
+      const trimmed = globalThis.document.createElement("canvas");
+      trimmed.width = right - left + 1;
+      trimmed.height = bottom - top + 1;
+      trimmed.getContext("2d")?.drawImage(canvas, left, top, trimmed.width, trimmed.height, 0, 0, trimmed.width, trimmed.height);
+      setCopiedRegion({ dataUrl: trimmed.toDataURL("image/png"), width: 0.28,
+        aspectRatio: trimmed.width / trimmed.height, kind: "signature" });
+      setSelectedRegion(null);
+      setSelectedStampId(null);
+      setActiveTool("crop");
+      setPasteActive(true);
+    } catch {
+      setError("无法读取签名 PDF，请确认文件未加密且第一页包含可见签名。");
+    } finally {
+      await signatureTask?.destroy();
       setLoading(false);
     }
   }
@@ -1520,6 +1641,16 @@ function App() {
           event.currentTarget.value = "";
         }}
       />
+      <input
+        ref={signatureInputRef}
+        className="file-input"
+        type="file"
+        accept="application/pdf,.pdf"
+        onChange={(event) => {
+          void openSignaturePdf(event.target.files?.[0]);
+          event.currentTarget.value = "";
+        }}
+      />
 
       <header className="titlebar">
         <div className="brand">
@@ -1550,7 +1681,12 @@ function App() {
             <button
               key={id}
               className={`tool-button ${activeTool === id ? "active" : ""}`}
+              disabled={id === "signature" && !composition.length}
               onClick={() => {
+                if (id === "signature") {
+                  signatureInputRef.current?.click();
+                  return;
+                }
                 setActiveTool(id);
                 if (id !== "crop") {
                   setSelectedRegion(null);
@@ -1569,7 +1705,7 @@ function App() {
         <button className="tool-button" title="顺时针旋转 90°" disabled={!composition.length} onClick={rotateSelectedPages}><RotateCw size={19} /><span>旋转</span></button>
         {activeTool === "crop" && (
           <div className="crop-actions">
-            <span>{pasteActive ? "单击原页面粘贴 · Esc 退出" : "在页面上拖动框选"}</span>
+            <span>{pasteActive ? "单击目标页面放置 · Esc 退出" : "在页面上拖动框选"}</span>
             <button disabled={!selectedRegion || selectedRegion.width < 0.003 || selectedRegion.height < 0.003} onClick={copySelectedRegion}><Copy size={14} />复制</button>
             <button disabled={!copiedRegion} className={pasteActive ? "active" : ""} onClick={() => setPasteActive(true)}>粘贴</button>
           </div>
@@ -1716,13 +1852,17 @@ function App() {
                       rotation={page.rotation}
                       pageId={page.id}
                       cropActive={activeTool === "crop"}
+                      stampEditingActive={activeTool === "select"}
                       pasteActive={pasteActive}
                       clipboardPreview={copiedRegion}
                       selection={selectedRegion}
                       stamps={page.stamps}
+                      selectedStampId={selectedStampId}
                       onSelectRegion={setSelectedRegion}
                       onPaste={pasteCopiedRegion}
                       onCopy={copySelectedRegion}
+                      onSelectStamp={setSelectedStampId}
+                      onUpdateStamp={updateStamp}
                       canvasSize={canvasSize}
                       zoom={zoom}
                       register={registerPage}

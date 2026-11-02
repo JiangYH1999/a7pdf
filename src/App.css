@@ -190,6 +190,11 @@ button { color: inherit; }
 .continuous-page.paste-active { cursor: copy; }
 .main-pdf-page { display: block; }
 .page-stamp, .page-paste-preview { position: absolute; z-index: 2; display: block; pointer-events: none; }
+.page-stamp-editor { position: absolute; z-index: 2; cursor: grab; touch-action: none; }
+.page-stamp-editor:active { cursor: grabbing; }
+.page-stamp-editor.selected { outline: 2px solid #24abc5; outline-offset: 2px; }
+.page-stamp-editor img { display: block; width: 100%; height: 100%; pointer-events: none; user-select: none; }
+.page-stamp-resize { position: absolute; right: -7px; bottom: -7px; width: 13px; height: 13px; border: 2px solid white; border-radius: 4px; background: #24abc5; box-shadow: 0 2px 7px #21434b55; cursor: nwse-resize; }
 .page-paste-preview { z-index: 4; opacity: .58; outline: 1px dashed #24abc5; }
 .page-region { position: absolute; z-index: 3; border: 1px solid #1bb0ce; background: #99eafa40; box-shadow: 0 0 0 1px #ffffffaa inset; pointer-events: none; }
 .page-region-copy { position: absolute; z-index: 5; display: flex; align-items: center; gap: 5px; padding: 6px 9px; border: 1px solid #99eafa; border-radius: 7px; background: #fff; box-shadow: 0 5px 15px #342d462a; color: #2b7584; cursor: pointer; font-size: 11px; line-height: 1; white-space: nowrap; transform: translateY(5px); }
