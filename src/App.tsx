@@ -24,7 +24,7 @@ import {
   RotateCcw,
   Scan,
   Copy,
-  Signature,
+  Check,
   Sparkles,
   Trash2,
   Type,
@@ -45,7 +45,7 @@ import "./App.css";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
 
-type Tool = "select" | "text" | "highlight" | "draw" | "image" | "comment" | "crop" | "signature";
+type Tool = "select" | "text" | "highlight" | "draw" | "image" | "comment" | "crop" | "overlay";
 type DropTarget = "canvas" | "library" | null;
 type PdfSource = {
   id: string;
@@ -70,9 +70,9 @@ type ComposedPage = {
   rotation: number;
   stamps: PageStamp[];
 };
-type PageStamp = { id: string; dataUrl: string; x: number; y: number; width: number; height: number };
+type PageStamp = { id: string; dataUrl: string; x: number; y: number; width: number; height: number; rotation: number };
 type PageRegion = { pageId: string; x: number; y: number; width: number; height: number };
-type CopiedRegion = { dataUrl: string; width: number; aspectRatio: number; kind: "region" | "signature" };
+type CopiedRegion = { dataUrl: string; width: number; aspectRatio: number };
 type CompositionBlock = {
   id: string;
   sourceId: string;
@@ -111,44 +111,89 @@ function stampSize(region: CopiedRegion, pageAspectRatio: number) {
   return { width, height: width * pageAspectRatio / region.aspectRatio };
 }
 
-function signatureFromCanvas(canvas: HTMLCanvasElement): CopiedRegion {
+type StampCorner = "nw" | "ne" | "sw" | "se";
+
+function constrainStamp(stamp: PageStamp, pageWidth: number, pageHeight: number): PageStamp {
+  const radians = stamp.rotation * Math.PI / 180;
+  const cosine = Math.abs(Math.cos(radians));
+  const sine = Math.abs(Math.sin(radians));
+  const halfWidth = (stamp.width * pageWidth * cosine + stamp.height * pageHeight * sine) / 2;
+  const halfHeight = (stamp.width * pageWidth * sine + stamp.height * pageHeight * cosine) / 2;
+  const scale = Math.min(1, pageWidth / (2 * halfWidth), pageHeight / (2 * halfHeight));
+  const width = stamp.width * scale;
+  const height = stamp.height * scale;
+  const boundX = halfWidth * scale;
+  const boundY = halfHeight * scale;
+  const centerX = Math.max(boundX, Math.min(pageWidth - boundX, (stamp.x + stamp.width / 2) * pageWidth));
+  const centerY = Math.max(boundY, Math.min(pageHeight - boundY, (stamp.y + stamp.height / 2) * pageHeight));
+  return { ...stamp, width, height,
+    x: (centerX - width * pageWidth / 2) / pageWidth,
+    y: (centerY - height * pageHeight / 2) / pageHeight };
+}
+
+function resizeStamp(stamp: PageStamp, corner: StampCorner, dx: number, dy: number, pageWidth: number, pageHeight: number): PageStamp {
+  const sx = corner.includes("e") ? 1 : -1;
+  const sy = corner.includes("s") ? 1 : -1;
+  const radians = stamp.rotation * Math.PI / 180;
+  const vx = sx * stamp.width * pageWidth * Math.cos(radians) - sy * stamp.height * pageHeight * Math.sin(radians);
+  const vy = sx * stamp.width * pageWidth * Math.sin(radians) + sy * stamp.height * pageHeight * Math.cos(radians);
+  const scale = Math.max(0.08, Math.min(1 / stamp.width, 1 / stamp.height,
+    1 + (dx * vx + dy * vy) / (vx * vx + vy * vy)));
+  const width = stamp.width * scale;
+  const height = stamp.height * scale;
+  const centerX = (stamp.x + stamp.width / 2) * pageWidth + vx * (scale - 1) / 2;
+  const centerY = (stamp.y + stamp.height / 2) * pageHeight + vy * (scale - 1) / 2;
+  return { ...stamp, width, height,
+    x: Math.max(0, Math.min(1 - width, (centerX - width * pageWidth / 2) / pageWidth)),
+    y: Math.max(0, Math.min(1 - height, (centerY - height * pageHeight / 2) / pageHeight)) };
+}
+
+function overlayFromCanvas(canvas: HTMLCanvasElement): CopiedRegion {
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Canvas unavailable");
   const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
   let left = canvas.width; let top = canvas.height; let right = -1; let bottom = -1;
+  let hasTransparency = false;
   for (let y = 0; y < canvas.height; y += 1) {
     for (let x = 0; x < canvas.width; x += 1) {
-      if (data[(y * canvas.width + x) * 4 + 3] < 8) continue;
+      const alpha = data[(y * canvas.width + x) * 4 + 3];
+      if (alpha < 254) hasTransparency = true;
+      if (alpha < 8) continue;
       left = Math.min(left, x); top = Math.min(top, y);
       right = Math.max(right, x); bottom = Math.max(bottom, y);
     }
   }
-  if (right < left) throw new Error("No visible signature");
+  if (right < left) throw new Error("No visible image");
   const trimmed = globalThis.document.createElement("canvas");
   trimmed.width = right - left + 1;
   trimmed.height = bottom - top + 1;
   trimmed.getContext("2d")?.drawImage(canvas, left, top, trimmed.width, trimmed.height, 0, 0, trimmed.width, trimmed.height);
-  return { dataUrl: trimmed.toDataURL("image/png"), width: 0.28,
-    aspectRatio: trimmed.width / trimmed.height, kind: "signature" };
+  return { dataUrl: trimmed.toDataURL("image/png"), width: hasTransparency ? 0.28 : 0.42,
+    aspectRatio: trimmed.width / trimmed.height };
 }
 
 function placeStamp(page: LibPdfPage, image: PDFImage, stamp: PageStamp) {
   const { width: pageWidth, height: pageHeight } = page.getSize();
   const angle = ((page.getRotation().angle % 360) + 360) % 360;
-  const { x, y, width, height } = stamp;
-  if (angle === 90) {
-    page.drawImage(image, { x: (y + height) * pageWidth, y: x * pageHeight,
-      width: width * pageHeight, height: height * pageWidth, rotate: degrees(90) });
-  } else if (angle === 180) {
-    page.drawImage(image, { x: (1 - x) * pageWidth, y: (y + height) * pageHeight,
-      width: width * pageWidth, height: height * pageHeight, rotate: degrees(180) });
-  } else if (angle === 270) {
-    page.drawImage(image, { x: (1 - y - height) * pageWidth, y: (1 - x) * pageHeight,
-      width: width * pageHeight, height: height * pageWidth, rotate: degrees(270) });
-  } else {
-    page.drawImage(image, { x: x * pageWidth, y: (1 - y - height) * pageHeight,
-      width: width * pageWidth, height: height * pageHeight });
-  }
+  const displayWidth = angle % 180 === 0 ? pageWidth : pageHeight;
+  const displayHeight = angle % 180 === 0 ? pageHeight : pageWidth;
+  const displayX = (stamp.x + stamp.width / 2) * displayWidth;
+  const displayY = (stamp.y + stamp.height / 2) * displayHeight;
+  const center = angle === 90 ? { x: displayY, y: displayX }
+    : angle === 180 ? { x: pageWidth - displayX, y: displayY }
+      : angle === 270 ? { x: pageWidth - displayY, y: pageHeight - displayX }
+        : { x: displayX, y: pageHeight - displayY };
+  const imageWidth = stamp.width * displayWidth;
+  const imageHeight = stamp.height * displayHeight;
+  const radians = (angle - stamp.rotation) * Math.PI / 180;
+  const cosine = Math.cos(radians);
+  const sine = Math.sin(radians);
+  page.drawImage(image, {
+    x: center.x - (imageWidth * cosine - imageHeight * sine) / 2,
+    y: center.y - (imageWidth * sine + imageHeight * cosine) / 2,
+    width: imageWidth, height: imageHeight,
+    rotate: degrees(angle - stamp.rotation),
+  });
 }
 
 const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
@@ -156,9 +201,9 @@ const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "text", label: "文本框", icon: Type },
   { id: "highlight", label: "高亮", icon: Highlighter },
   { id: "draw", label: "画笔", icon: PenLine },
-  { id: "image", label: "图片", icon: ImagePlus },
+  { id: "image", label: "图片页", icon: FilePlus2 },
   { id: "crop", label: "框选复制", icon: Scan },
-  { id: "signature", label: "添加签名", icon: Signature },
+  { id: "overlay", label: "添加图片", icon: ImagePlus },
   { id: "comment", label: "批注", icon: MessageSquareText },
 ];
 
@@ -178,6 +223,22 @@ function positionHits(
     && y <= bounds.bottom
   ));
 }
+
+function pageDropAt(position: { x: number; y: number }) {
+  const scale = window.devicePixelRatio || 1;
+  for (const point of [position, { x: position.x / scale, y: position.y / scale }]) {
+    const element = globalThis.document.elementFromPoint(point.x, point.y)?.closest<HTMLElement>(".continuous-page");
+    if (!element?.dataset.pageId) continue;
+    const bounds = element.getBoundingClientRect();
+    return { pageId: element.dataset.pageId,
+      x: Math.max(0, Math.min(1, (point.x - bounds.left) / bounds.width)),
+      y: Math.max(0, Math.min(1, (point.y - bounds.top) / bounds.height)),
+      pageAspectRatio: bounds.width / bounds.height };
+  }
+  return null;
+}
+
+type PageDrop = NonNullable<ReturnType<typeof pageDropAt>>;
 
 function PdfCanvas({
   page,
@@ -315,6 +376,7 @@ function Thumbnail({
           {stamps.map((stamp) => (
             <img key={stamp.id} className="page-stamp" src={stamp.dataUrl} alt="" draggable={false} style={{
               left: `${stamp.x * 100}%`, top: `${stamp.y * 100}%`, width: `${stamp.width * 100}%`, height: `${stamp.height * 100}%`,
+              transform: `rotate(${stamp.rotation}deg)`,
             }} />
           ))}
         </div>
@@ -489,8 +551,8 @@ function ContinuousPage({
   onSelectRegion: (region: PageRegion | null) => void;
   onPaste: (pageId: string, x: number, y: number, pageAspectRatio: number) => void;
   onCopy: () => void;
-  onSelectStamp: (id: string) => void;
-  onUpdateStamp: (pageId: string, stampId: string, layout: Pick<PageStamp, "x" | "y" | "width" | "height">) => void;
+  onSelectStamp: (id: string | null) => void;
+  onUpdateStamp: (pageId: string, stampId: string, layout: Pick<PageStamp, "x" | "y" | "width" | "height" | "rotation">) => void;
 }) {
   const [page, setPage] = useState<PDFPageProxy | null>(null);
   const pageContainerRef = useRef<HTMLDivElement | null>(null);
@@ -498,7 +560,9 @@ function ContinuousPage({
   const selectionStart = useRef<{ x: number; y: number; pointerId: number } | null>(null);
   const [pastePoint, setPastePoint] = useState<{ x: number; y: number } | null>(null);
   const [stampDraft, setStampDraft] = useState<PageStamp | null>(null);
-  const stampDrag = useRef<{ pointerId: number; startX: number; startY: number; stamp: PageStamp; resize: boolean } | null>(null);
+  const stampDraftRef = useRef<PageStamp | null>(null);
+  const stampDrag = useRef<{ pointerId: number; startX: number; startY: number; stamp: PageStamp;
+    mode: "move" | "resize" | "rotate"; corner?: StampCorner } | null>(null);
 
   const pointOnPage = (event: ReactPointerEvent<HTMLDivElement>) => {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -547,7 +611,11 @@ function ContinuousPage({
         register(sequenceNumber, element);
       }}
       onPointerDown={(event) => {
-        if (!cropActive || event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+        if (event.button !== 0 || (event.target as HTMLElement).closest("button")) return;
+        if (!cropActive) {
+          if (stampEditingActive) onSelectStamp(null);
+          return;
+        }
         const point = pointOnPage(event);
         if (pasteActive) {
           const bounds = event.currentTarget.getBoundingClientRect();
@@ -589,47 +657,71 @@ function ContinuousPage({
         const layout = stampDraft?.id === stamp.id ? stampDraft : stamp;
         return stampEditingActive ? (
           <div key={stamp.id} className={`page-stamp-editor ${selectedStampId === stamp.id ? "selected" : ""}`}
-            style={{ left: `${layout.x * 100}%`, top: `${layout.y * 100}%`, width: `${layout.width * 100}%`, height: `${layout.height * 100}%` }}
+            style={{ left: `${layout.x * 100}%`, top: `${layout.y * 100}%`, width: `${layout.width * 100}%`, height: `${layout.height * 100}%`,
+              transform: `rotate(${layout.rotation}deg)` }}
             onPointerDown={(event) => {
               if (event.button !== 0) return;
               event.stopPropagation();
               event.currentTarget.setPointerCapture(event.pointerId);
               onSelectStamp(stamp.id);
+              stampDraftRef.current = null;
+              const handle = (event.target as HTMLElement).closest<HTMLElement>("[data-stamp-handle]");
               stampDrag.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
-                stamp: layout, resize: (event.target as HTMLElement).classList.contains("page-stamp-resize") };
+                stamp: layout, mode: handle?.dataset.stampHandle === "rotate" ? "rotate" : handle ? "resize" : "move",
+                corner: handle?.dataset.stampHandle as StampCorner | undefined };
             }}
             onPointerMove={(event) => {
               const drag = stampDrag.current;
               if (!drag || drag.pointerId !== event.pointerId) return;
               const bounds = pageContainerRef.current?.getBoundingClientRect();
               if (!bounds) return;
-              const dx = (event.clientX - drag.startX) / bounds.width;
-              const dy = (event.clientY - drag.startY) / bounds.height;
-              if (drag.resize) {
-                const ratio = drag.stamp.height / drag.stamp.width;
-                const maxWidth = Math.min(1 - drag.stamp.x, (1 - drag.stamp.y) / ratio);
-                const width = Math.max(Math.min(0.02, maxWidth), Math.min(maxWidth, drag.stamp.width + dx));
-                setStampDraft({ ...drag.stamp, width, height: width * ratio });
+              const dx = event.clientX - drag.startX;
+              const dy = event.clientY - drag.startY;
+              let next: PageStamp;
+              if (drag.mode === "resize" && drag.corner) {
+                next = resizeStamp(drag.stamp, drag.corner, dx, dy, bounds.width, bounds.height);
+              } else if (drag.mode === "rotate") {
+                const centerX = bounds.left + (drag.stamp.x + drag.stamp.width / 2) * bounds.width;
+                const centerY = bounds.top + (drag.stamp.y + drag.stamp.height / 2) * bounds.height;
+                const startAngle = Math.atan2(drag.startY - centerY, drag.startX - centerX);
+                const angle = Math.atan2(event.clientY - centerY, event.clientX - centerX);
+                next = { ...drag.stamp, rotation: (drag.stamp.rotation + (angle - startAngle) * 180 / Math.PI + 360) % 360 };
               } else {
-                setStampDraft({ ...drag.stamp,
-                  x: Math.max(0, Math.min(1 - drag.stamp.width, drag.stamp.x + dx)),
-                  y: Math.max(0, Math.min(1 - drag.stamp.height, drag.stamp.y + dy)) });
+                next = { ...drag.stamp,
+                  x: Math.max(0, Math.min(1 - drag.stamp.width, drag.stamp.x + dx / bounds.width)),
+                  y: Math.max(0, Math.min(1 - drag.stamp.height, drag.stamp.y + dy / bounds.height)) };
               }
+              const constrained = constrainStamp(next, bounds.width, bounds.height);
+              stampDraftRef.current = constrained;
+              setStampDraft(constrained);
             }}
             onPointerUp={(event) => {
               if (stampDrag.current?.pointerId !== event.pointerId) return;
-              if (stampDraft?.id === stamp.id) onUpdateStamp(pageId, stamp.id, stampDraft);
+              if (stampDraftRef.current?.id === stamp.id) onUpdateStamp(pageId, stamp.id, stampDraftRef.current);
               stampDrag.current = null;
+              stampDraftRef.current = null;
               setStampDraft(null);
             }}
-            onPointerCancel={() => { stampDrag.current = null; setStampDraft(null); }}
+            onPointerCancel={() => { stampDrag.current = null; stampDraftRef.current = null; setStampDraft(null); }}
           >
-            <img src={stamp.dataUrl} alt="签名或贴片" draggable={false} />
-            {selectedStampId === stamp.id && <span className="page-stamp-resize" aria-label="调整贴片大小" />}
+            <img src={stamp.dataUrl} alt="页面图片" draggable={false} />
+            {selectedStampId === stamp.id && (
+              <>
+                {(["nw", "ne", "sw", "se"] as StampCorner[]).map((corner) => (
+                  <span key={corner} className={`page-stamp-handle corner-${corner}`} data-stamp-handle={corner}
+                    aria-label={`从${corner}角调整大小`} />
+                ))}
+                <span className="page-stamp-rotate" data-stamp-handle="rotate" aria-label="旋转图片"><RotateCw size={14} /></span>
+                <button className="page-stamp-confirm" title="完成编辑" style={{ transform: `rotate(${-layout.rotation}deg)` }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => { event.stopPropagation(); onSelectStamp(null); }}><Check size={14} />完成</button>
+              </>
+            )}
           </div>
         ) : (
           <img key={stamp.id} className="page-stamp" src={stamp.dataUrl} alt="" draggable={false} style={{
             left: `${layout.x * 100}%`, top: `${layout.y * 100}%`, width: `${layout.width * 100}%`, height: `${layout.height * 100}%`,
+            transform: `rotate(${layout.rotation}deg)`,
           }} />
         );
       })}
@@ -683,7 +775,7 @@ function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
-  const signatureInputRef = useRef<HTMLInputElement>(null);
+  const overlayInputRef = useRef<HTMLInputElement>(null);
   const canvasAreaRef = useRef<HTMLElement>(null);
   const canvasScrollRef = useRef<HTMLDivElement>(null);
   const thumbnailsRef = useRef<HTMLDivElement>(null);
@@ -790,9 +882,7 @@ function App() {
           const canvasBounds = canvasAreaRef.current?.getBoundingClientRect();
           const overLibrary = positionHits(event.payload.position, libraryBounds);
           const overCanvas = positionHits(event.payload.position, canvasBounds);
-          setDropTarget(
-            overLibrary ? "library" : overCanvas && sourcesRef.current.length === 0 ? "canvas" : null,
-          );
+          setDropTarget(overLibrary ? "library" : overCanvas ? "canvas" : null);
           return;
         }
 
@@ -806,8 +896,21 @@ function App() {
         const canvasBounds = canvasAreaRef.current?.getBoundingClientRect();
         const droppedOnLibrary = positionHits(event.payload.position, libraryBounds);
         const droppedOnCanvas = positionHits(event.payload.position, canvasBounds);
+        const imagePaths = event.payload.paths.filter((path) => /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(path));
         const pdfPaths = event.payload.paths.filter((path) => path.toLowerCase().endsWith(".pdf"));
         setDropTarget(null);
+        if (droppedOnCanvas && imagePaths.length && compositionRef.current.length) {
+          const target = pageDropAt(event.payload.position);
+          if (!target) { setError("请将图片放在具体的 PDF 页面上。"); return; }
+          try {
+            for (const path of imagePaths) {
+              const bytes = await invoke<number[]>("read_image_file", { path });
+              const name = path.split(/[\\/]/).pop() || "image.png";
+              await openOverlayFile(new File([new Uint8Array(bytes)], name), target);
+            }
+          } catch { setError("无法读取拖入的图片，请检查文件格式或访问权限。"); }
+          return;
+        }
         if (!pdfPaths.length) {
           setError("请拖入一个 PDF 文件。");
           return;
@@ -957,16 +1060,16 @@ function App() {
         return image;
       }));
       stamps.forEach((stamp, stampIndex) => {
-        context.drawImage(
-          images[stampIndex],
-          stamp.x * canvas.width - x,
-          stamp.y * canvas.height - y,
-          stamp.width * canvas.width,
-          stamp.height * canvas.height,
-        );
+        context.save();
+        context.translate((stamp.x + stamp.width / 2) * canvas.width - x,
+          (stamp.y + stamp.height / 2) * canvas.height - y);
+        context.rotate(stamp.rotation * Math.PI / 180);
+        context.drawImage(images[stampIndex], -stamp.width * canvas.width / 2,
+          -stamp.height * canvas.height / 2, stamp.width * canvas.width, stamp.height * canvas.height);
+        context.restore();
       });
       setCopiedRegion({ dataUrl: clipped.toDataURL("image/png"), width: region.width,
-        aspectRatio: clipped.width / clipped.height, kind: "region" });
+        aspectRatio: clipped.width / clipped.height });
       setSelectedRegion(null);
       setPasteActive(true);
     } catch {
@@ -976,27 +1079,31 @@ function App() {
 
   function pasteCopiedRegion(pageId: string, centerX: number, centerY: number, pageAspectRatio: number) {
     if (!copiedRegion) return;
-    const { width, height } = stampSize(copiedRegion, pageAspectRatio);
-    const stamp: PageStamp = {
-      id: crypto.randomUUID(), dataUrl: copiedRegion.dataUrl,
-      width, height,
-      x: Math.max(0, Math.min(1 - width, centerX - width / 2)),
-      y: Math.max(0, Math.min(1 - height, centerY - height / 2)),
-    };
-    commitComposition(compositionRef.current.map((page) => (
-      page.id === pageId ? { ...page, stamps: [...page.stamps, stamp] } : page
-    )));
-    if (copiedRegion.kind === "signature") {
-      setPasteActive(false);
-      setActiveTool("select");
-      setSelectedStampId(stamp.id);
-    }
+    placeRegion(copiedRegion, { pageId, x: centerX, y: centerY, pageAspectRatio });
   }
 
-  function updateStamp(pageId: string, stampId: string, layout: Pick<PageStamp, "x" | "y" | "width" | "height">) {
+  function placeRegion(region: CopiedRegion, target: PageDrop) {
+    const { width, height } = stampSize(region, target.pageAspectRatio);
+    const stamp: PageStamp = {
+      id: crypto.randomUUID(), dataUrl: region.dataUrl,
+      width, height,
+      x: Math.max(0, Math.min(1 - width, target.x - width / 2)),
+      y: Math.max(0, Math.min(1 - height, target.y - height / 2)),
+      rotation: 0,
+    };
+    commitComposition(compositionRef.current.map((page) => (
+      page.id === target.pageId ? { ...page, stamps: [...page.stamps, stamp] } : page
+    )));
+    setPasteActive(false);
+    setActiveTool("select");
+    setSelectedStampId(stamp.id);
+  }
+
+  function updateStamp(pageId: string, stampId: string, layout: Pick<PageStamp, "x" | "y" | "width" | "height" | "rotation">) {
     const page = compositionRef.current.find((item) => item.id === pageId);
     const stamp = page?.stamps.find((item) => item.id === stampId);
-    if (!stamp || (stamp.x === layout.x && stamp.y === layout.y && stamp.width === layout.width && stamp.height === layout.height)) return;
+    if (!stamp || (stamp.x === layout.x && stamp.y === layout.y && stamp.width === layout.width
+      && stamp.height === layout.height && stamp.rotation === layout.rotation)) return;
     commitComposition(compositionRef.current.map((item) => item.id === pageId
       ? { ...item, stamps: item.stamps.map((entry) => entry.id === stampId ? { ...entry, ...layout } : entry) }
       : item));
@@ -1300,16 +1407,16 @@ function App() {
     }
   }
 
-  async function openSignatureFile(file?: File) {
+  async function openOverlayFile(file?: File, target?: PageDrop) {
     if (!file) return;
     setLoading(true);
     setError("");
-    let signatureTask: ReturnType<typeof getDocument> | null = null;
+    let overlayTask: ReturnType<typeof getDocument> | null = null;
     try {
       const canvas = globalThis.document.createElement("canvas");
       const context = canvas.getContext("2d");
       if (!context) throw new Error("Canvas unavailable");
-      if (file.type === "image/png" || file.name.toLowerCase().endsWith(".png")) {
+      if (file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(file.name)) {
         const url = URL.createObjectURL(file);
         try {
           const image = new Image();
@@ -1323,26 +1430,30 @@ function App() {
           URL.revokeObjectURL(url);
         }
       } else if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-        signatureTask = getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
-        const signatureDocument = await signatureTask.promise;
-        const page = await signatureDocument.getPage(1);
+        overlayTask = getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+        const overlayDocument = await overlayTask.promise;
+        const page = await overlayDocument.getPage(1);
         const natural = page.getViewport({ scale: 1 });
         const viewport = page.getViewport({ scale: Math.min(3, 2400 / Math.max(natural.width, natural.height)) });
         canvas.width = Math.ceil(viewport.width);
         canvas.height = Math.ceil(viewport.height);
         await page.render({ canvas, canvasContext: context, viewport, background: "rgba(0, 0, 0, 0)" }).promise;
       } else {
-        throw new Error("Unsupported signature format");
+        throw new Error("Unsupported image format");
       }
-      setCopiedRegion(signatureFromCanvas(canvas));
+      const region = overlayFromCanvas(canvas);
+      setCopiedRegion(region);
       setSelectedRegion(null);
       setSelectedStampId(null);
-      setActiveTool("crop");
-      setPasteActive(true);
+      if (target) placeRegion(region, target);
+      else {
+        setActiveTool("crop");
+        setPasteActive(true);
+      }
     } catch {
-      setError("无法读取签名，请选择包含可见内容的 PNG 或未加密 PDF。");
+      setError("无法读取图片，请选择受系统支持的图片，或包含可见内容的未加密 PDF。");
     } finally {
-      await signatureTask?.destroy();
+      await overlayTask?.destroy();
       setLoading(false);
     }
   }
@@ -1400,11 +1511,19 @@ function App() {
     setPageNumber(insertAfter === undefined ? 1 : insertionIndex + 1);
   }
 
-  function handleWebFiles(files: FileList | null, target: "canvas" | "library") {
+  function handleWebFiles(files: FileList | null, target: "canvas" | "library", position?: { x: number; y: number }) {
+    const imageFiles = Array.from(files ?? []).filter((file) => file.type.startsWith("image/")
+      || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(file.name));
     const pdfFiles = Array.from(files ?? []).filter(
       (file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"),
     );
     setDropTarget(null);
+    if (target === "canvas" && imageFiles.length && compositionRef.current.length && position) {
+      const placement = pageDropAt(position);
+      if (!placement) { setError("请将图片放在具体的 PDF 页面上。"); return; }
+      void (async () => { for (const file of imageFiles) await openOverlayFile(file, placement); })();
+      return;
+    }
     if (!pdfFiles.length) {
       setError("请拖入一个 PDF 文件。");
       return;
@@ -1464,14 +1583,36 @@ function App() {
     commitComposition(next);
   }
 
-  function rotateSelectedPages() {
+  async function rotateSelectedPages() {
     const pageIds = selectedPageIds.size
       ? selectedPageIds
       : new Set(composition[pageNumber - 1] ? [composition[pageNumber - 1].id] : []);
     if (!pageIds.size) return;
-    commitComposition(compositionRef.current.map((page) => (
-      pageIds.has(page.id) ? { ...page, rotation: ((page.rotation ?? 0) + 90) % 360 } : page
-    )));
+    try {
+      const dimensions = new Map<string, { width: number; height: number }>();
+      await Promise.all(compositionRef.current.filter((page) => pageIds.has(page.id) && page.stamps.length).map(async (item) => {
+        const source = sourcesRef.current.find((entry) => entry.id === item.sourceId);
+        if (!source) return;
+        const page = await source.document.getPage(item.pageNumber);
+        const viewport = page.getViewport({ scale: 1, rotation: displayRotation(page, item.rotation) });
+        dimensions.set(item.id, { width: viewport.width, height: viewport.height });
+      }));
+      commitComposition(compositionRef.current.map((page) => {
+        if (!pageIds.has(page.id)) return page;
+        const size = dimensions.get(page.id);
+        return { ...page, rotation: (page.rotation + 90) % 360,
+          stamps: size ? page.stamps.map((stamp) => {
+            const width = stamp.width * size.width / size.height;
+            const height = stamp.height * size.height / size.width;
+            const centerX = 1 - stamp.y - stamp.height / 2;
+            const centerY = stamp.x + stamp.width / 2;
+            return constrainStamp({ ...stamp, width, height, x: centerX - width / 2, y: centerY - height / 2,
+              rotation: (stamp.rotation + 90) % 360 }, size.height, size.width);
+          }) : page.stamps };
+      }));
+    } catch {
+      setError("无法旋转页面，请稍后重试。");
+    }
   }
 
   async function adjustCurrentImage(action: "smaller" | "larger" | "left" | "right" | "up" | "down" | "reset") {
@@ -1665,12 +1806,12 @@ function App() {
         }}
       />
       <input
-        ref={signatureInputRef}
+        ref={overlayInputRef}
         className="file-input"
         type="file"
-        accept="image/png,application/pdf,.png,.pdf"
+        accept="image/*,application/pdf,.pdf"
         onChange={(event) => {
-          void openSignatureFile(event.target.files?.[0]);
+          void openOverlayFile(event.target.files?.[0]);
           event.currentTarget.value = "";
         }}
       />
@@ -1704,10 +1845,10 @@ function App() {
             <button
               key={id}
               className={`tool-button ${activeTool === id ? "active" : ""}`}
-              disabled={id === "signature" && !composition.length}
+              disabled={id === "overlay" && !composition.length}
               onClick={() => {
-                if (id === "signature") {
-                  signatureInputRef.current?.click();
+                if (id === "overlay") {
+                  overlayInputRef.current?.click();
                   return;
                 }
                 setActiveTool(id);
@@ -1845,18 +1986,16 @@ function App() {
           className="canvas-area"
           ref={canvasAreaRef}
           onDragEnter={(event) => {
-            if (sources.length === 0) {
-              event.preventDefault();
-              setDropTarget("canvas");
-            }
+            event.preventDefault();
+            setDropTarget("canvas");
           }}
           onDragOver={(event) => {
-            if (sources.length === 0) event.preventDefault();
+            event.preventDefault();
           }}
           onDragLeave={() => dropTarget === "canvas" && setDropTarget(null)}
           onDrop={(event) => {
             event.preventDefault();
-            handleWebFiles(event.dataTransfer.files, "canvas");
+            handleWebFiles(event.dataTransfer.files, "canvas", { x: event.clientX, y: event.clientY });
           }}
         >
           <div className="canvas-scroll" ref={canvasScrollRef} onScroll={updateVisiblePage}>
@@ -1898,7 +2037,9 @@ function App() {
             )}
           </div>
           {error && <div className="error-toast">{error}</div>}
-          {dropTarget === "canvas" && (
+          {dropTarget === "canvas" && composition.length > 0 ? (
+            <div className="image-drop-hint">将图片放到 PDF 页面上以叠加</div>
+          ) : dropTarget === "canvas" && (
             <div className="native-drop-overlay">
               <FilePlus2 size={34} />
               <strong>松开以打开 PDF</strong>

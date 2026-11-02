@@ -194,7 +194,14 @@ button { color: inherit; }
 .page-stamp-editor:active { cursor: grabbing; }
 .page-stamp-editor.selected { outline: 2px solid #24abc5; outline-offset: 2px; }
 .page-stamp-editor img { display: block; width: 100%; height: 100%; pointer-events: none; user-select: none; }
-.page-stamp-resize { position: absolute; right: -7px; bottom: -7px; width: 13px; height: 13px; border: 2px solid white; border-radius: 4px; background: #24abc5; box-shadow: 0 2px 7px #21434b55; cursor: nwse-resize; }
+.page-stamp-handle { position: absolute; z-index: 2; width: 14px; height: 14px; border: 2px solid white; border-radius: 4px; background: #24abc5; box-shadow: 0 2px 7px #21434b55; }
+.page-stamp-handle.corner-nw { left: -8px; top: -8px; cursor: nwse-resize; }
+.page-stamp-handle.corner-ne { right: -8px; top: -8px; cursor: nesw-resize; }
+.page-stamp-handle.corner-sw { left: -8px; bottom: -8px; cursor: nesw-resize; }
+.page-stamp-handle.corner-se { right: -8px; bottom: -8px; cursor: nwse-resize; }
+.page-stamp-rotate { position: absolute; z-index: 2; left: calc(50% - 12px); top: -35px; display: grid; width: 24px; height: 24px; place-items: center; border: 2px solid white; border-radius: 50%; background: #24abc5; box-shadow: 0 2px 7px #21434b55; color: white; cursor: grab; }
+.page-stamp-rotate::after { content: ""; position: absolute; top: 21px; left: 9px; width: 2px; height: 12px; background: #24abc5; pointer-events: none; }
+.page-stamp-confirm { position: absolute; z-index: 3; bottom: -37px; right: 0; display: flex; align-items: center; gap: 3px; padding: 5px 8px; border: 1px solid #bce9f0; border-radius: 7px; background: white; box-shadow: 0 4px 12px #21434b33; color: #286a76; cursor: pointer; font-size: 10px; line-height: 1; white-space: nowrap; }
 .page-paste-preview { z-index: 4; opacity: .58; outline: 1px dashed #24abc5; }
 .page-region { position: absolute; z-index: 3; border: 1px solid #1bb0ce; background: #99eafa40; box-shadow: 0 0 0 1px #ffffffaa inset; pointer-events: none; }
 .page-region-copy { position: absolute; z-index: 5; display: flex; align-items: center; gap: 5px; padding: 6px 9px; border: 1px solid #99eafa; border-radius: 7px; background: #fff; box-shadow: 0 5px 15px #342d462a; color: #2b7584; cursor: pointer; font-size: 11px; line-height: 1; white-space: nowrap; transform: translateY(5px); }
@@ -258,6 +265,7 @@ button { color: inherit; }
 }
 .native-drop-overlay strong { margin-top: 4px; font-size: 17px; }
 .native-drop-overlay span { color: #8b85a1; font-size: 11px; }
+.image-drop-hint { position: absolute; z-index: 20; top: 16px; left: 50%; padding: 9px 14px; border: 1px solid #bce9f0; border-radius: 999px; background: #ffffffeb; box-shadow: 0 8px 24px #342d4625; color: #317181; font-size: 11px; pointer-events: none; transform: translateX(-50%); }
 
 @media (max-width: 1180px) {
   .workspace { grid-template-columns: 190px minmax(560px, 1fr) 258px; }
