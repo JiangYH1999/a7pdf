@@ -111,6 +111,27 @@ function stampSize(region: CopiedRegion, pageAspectRatio: number) {
   return { width, height: width * pageAspectRatio / region.aspectRatio };
 }
 
+function signatureFromCanvas(canvas: HTMLCanvasElement): CopiedRegion {
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Canvas unavailable");
+  const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+  let left = canvas.width; let top = canvas.height; let right = -1; let bottom = -1;
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      if (data[(y * canvas.width + x) * 4 + 3] < 8) continue;
+      left = Math.min(left, x); top = Math.min(top, y);
+      right = Math.max(right, x); bottom = Math.max(bottom, y);
+    }
+  }
+  if (right < left) throw new Error("No visible signature");
+  const trimmed = globalThis.document.createElement("canvas");
+  trimmed.width = right - left + 1;
+  trimmed.height = bottom - top + 1;
+  trimmed.getContext("2d")?.drawImage(canvas, left, top, trimmed.width, trimmed.height, 0, 0, trimmed.width, trimmed.height);
+  return { dataUrl: trimmed.toDataURL("image/png"), width: 0.28,
+    aspectRatio: trimmed.width / trimmed.height, kind: "signature" };
+}
+
 function placeStamp(page: LibPdfPage, image: PDFImage, stamp: PageStamp) {
   const { width: pageWidth, height: pageHeight } = page.getSize();
   const angle = ((page.getRotation().angle % 360) + 360) % 360;
@@ -137,7 +158,7 @@ const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
   { id: "draw", label: "画笔", icon: PenLine },
   { id: "image", label: "图片", icon: ImagePlus },
   { id: "crop", label: "框选复制", icon: Scan },
-  { id: "signature", label: "签名 PDF", icon: Signature },
+  { id: "signature", label: "添加签名", icon: Signature },
   { id: "comment", label: "批注", icon: MessageSquareText },
 ];
 
@@ -1279,45 +1300,47 @@ function App() {
     }
   }
 
-  async function openSignaturePdf(file?: File) {
+  async function openSignatureFile(file?: File) {
     if (!file) return;
     setLoading(true);
     setError("");
     let signatureTask: ReturnType<typeof getDocument> | null = null;
     try {
-      signatureTask = getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
-      const signatureDocument = await signatureTask.promise;
-      const page = await signatureDocument.getPage(1);
-      const natural = page.getViewport({ scale: 1 });
-      const viewport = page.getViewport({ scale: Math.min(3, 2400 / Math.max(natural.width, natural.height)) });
       const canvas = globalThis.document.createElement("canvas");
-      canvas.width = Math.ceil(viewport.width);
-      canvas.height = Math.ceil(viewport.height);
       const context = canvas.getContext("2d");
       if (!context) throw new Error("Canvas unavailable");
-      await page.render({ canvas, canvasContext: context, viewport, background: "rgba(0, 0, 0, 0)" }).promise;
-      const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
-      let left = canvas.width; let top = canvas.height; let right = -1; let bottom = -1;
-      for (let y = 0; y < canvas.height; y += 1) {
-        for (let x = 0; x < canvas.width; x += 1) {
-          if (data[(y * canvas.width + x) * 4 + 3] < 8) continue;
-          left = Math.min(left, x); top = Math.min(top, y);
-          right = Math.max(right, x); bottom = Math.max(bottom, y);
+      if (file.type === "image/png" || file.name.toLowerCase().endsWith(".png")) {
+        const url = URL.createObjectURL(file);
+        try {
+          const image = new Image();
+          image.src = url;
+          await image.decode();
+          const scale = Math.min(1, 2400 / Math.max(image.naturalWidth, image.naturalHeight));
+          canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        } finally {
+          URL.revokeObjectURL(url);
         }
+      } else if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        signatureTask = getDocument({ data: new Uint8Array(await file.arrayBuffer()) });
+        const signatureDocument = await signatureTask.promise;
+        const page = await signatureDocument.getPage(1);
+        const natural = page.getViewport({ scale: 1 });
+        const viewport = page.getViewport({ scale: Math.min(3, 2400 / Math.max(natural.width, natural.height)) });
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        await page.render({ canvas, canvasContext: context, viewport, background: "rgba(0, 0, 0, 0)" }).promise;
+      } else {
+        throw new Error("Unsupported signature format");
       }
-      if (right < left) throw new Error("No visible signature");
-      const trimmed = globalThis.document.createElement("canvas");
-      trimmed.width = right - left + 1;
-      trimmed.height = bottom - top + 1;
-      trimmed.getContext("2d")?.drawImage(canvas, left, top, trimmed.width, trimmed.height, 0, 0, trimmed.width, trimmed.height);
-      setCopiedRegion({ dataUrl: trimmed.toDataURL("image/png"), width: 0.28,
-        aspectRatio: trimmed.width / trimmed.height, kind: "signature" });
+      setCopiedRegion(signatureFromCanvas(canvas));
       setSelectedRegion(null);
       setSelectedStampId(null);
       setActiveTool("crop");
       setPasteActive(true);
     } catch {
-      setError("无法读取签名 PDF，请确认文件未加密且第一页包含可见签名。");
+      setError("无法读取签名，请选择包含可见内容的 PNG 或未加密 PDF。");
     } finally {
       await signatureTask?.destroy();
       setLoading(false);
@@ -1645,9 +1668,9 @@ function App() {
         ref={signatureInputRef}
         className="file-input"
         type="file"
-        accept="application/pdf,.pdf"
+        accept="image/png,application/pdf,.png,.pdf"
         onChange={(event) => {
-          void openSignaturePdf(event.target.files?.[0]);
+          void openSignatureFile(event.target.files?.[0]);
           event.currentTarget.value = "";
         }}
       />
