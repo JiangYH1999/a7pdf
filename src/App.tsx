@@ -36,11 +36,13 @@ import {
   type PDFDocumentProxy,
   type PDFPageProxy,
 } from "pdfjs-dist";
-import { degrees, PDFDocument, type PDFPage as LibPdfPage, type PDFImage } from "pdf-lib";
+import { degrees, PDFDocument, type PDFImage } from "pdf-lib";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { save } from "@tauri-apps/plugin-dialog";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import { duplicatePages, pageCopyBatches, type ComposedPage, type PageStamp } from "./duplicatePages";
+import { placeStamp } from "./stampPlacement";
 import "./App.css";
 
 GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -63,14 +65,6 @@ type ImageSource = {
   original: ImageLayout;
   layout: ImageLayout;
 };
-type ComposedPage = {
-  id: string;
-  sourceId: string;
-  pageNumber: number;
-  rotation: number;
-  stamps: PageStamp[];
-};
-type PageStamp = { id: string; dataUrl: string; x: number; y: number; width: number; height: number; rotation: number };
 type PageRegion = { pageId: string; x: number; y: number; width: number; height: number };
 type CopiedRegion = { dataUrl: string; width: number; aspectRatio: number };
 type CompositionBlock = {
@@ -170,30 +164,6 @@ function overlayFromCanvas(canvas: HTMLCanvasElement): CopiedRegion {
   trimmed.getContext("2d")?.drawImage(canvas, left, top, trimmed.width, trimmed.height, 0, 0, trimmed.width, trimmed.height);
   return { dataUrl: trimmed.toDataURL("image/png"), width: hasTransparency ? 0.28 : 0.42,
     aspectRatio: trimmed.width / trimmed.height };
-}
-
-function placeStamp(page: LibPdfPage, image: PDFImage, stamp: PageStamp) {
-  const { width: pageWidth, height: pageHeight } = page.getSize();
-  const angle = ((page.getRotation().angle % 360) + 360) % 360;
-  const displayWidth = angle % 180 === 0 ? pageWidth : pageHeight;
-  const displayHeight = angle % 180 === 0 ? pageHeight : pageWidth;
-  const displayX = (stamp.x + stamp.width / 2) * displayWidth;
-  const displayY = (stamp.y + stamp.height / 2) * displayHeight;
-  const center = angle === 90 ? { x: displayY, y: displayX }
-    : angle === 180 ? { x: pageWidth - displayX, y: displayY }
-      : angle === 270 ? { x: pageWidth - displayY, y: pageHeight - displayX }
-        : { x: displayX, y: pageHeight - displayY };
-  const imageWidth = stamp.width * displayWidth;
-  const imageHeight = stamp.height * displayHeight;
-  const radians = (angle - stamp.rotation) * Math.PI / 180;
-  const cosine = Math.cos(radians);
-  const sine = Math.sin(radians);
-  page.drawImage(image, {
-    x: center.x - (imageWidth * cosine - imageHeight * sine) / 2,
-    y: center.y - (imageWidth * sine + imageHeight * cosine) / 2,
-    width: imageWidth, height: imageHeight,
-    rotate: degrees(angle - stamp.rotation),
-  });
 }
 
 const tools: Array<{ id: Tool; label: string; icon: typeof MousePointer2 }> = [
@@ -1012,7 +982,7 @@ function App() {
     const ids = selectedPageIds.size ? selectedPageIds : new Set(fallbackPageId ? [fallbackPageId] : []);
     const selected = composition.filter((page) => ids.has(page.id));
     if (!selected.length) return;
-    const copies = selected.map((page) => ({ ...page, id: `${page.id}-copy-${crypto.randomUUID()}` }));
+    const copies = duplicatePages(selected);
     const lastSelectedIndex = composition.reduce((last, page, index) => ids.has(page.id) ? index : last, -1);
     const next = [...composition];
     next.splice(lastSelectedIndex + 1, 0, ...copies);
@@ -1725,8 +1695,9 @@ function App() {
       for (const [sourceId, pages] of pagesBySource) {
         const source = sourceDocuments.get(sourceId);
         if (!source) continue;
-        for (let offset = 0; offset < pages.length; offset += batchSize) {
-          const batch = pages.slice(offset, offset + batchSize);
+        for (const batch of pageCopyBatches(pages, batchSize)) {
+          // pdf-lib shares a copied content stream when the same source page
+          // appears twice in one copyPages call; edits would then bleed across pages.
           const copiedBatch = await output.copyPages(source, batch.map((page) => page.pageNumber - 1));
           batch.forEach((page, index) => {
             const copiedPage = copiedBatch[index];
